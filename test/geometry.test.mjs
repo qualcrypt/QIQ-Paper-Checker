@@ -102,12 +102,14 @@ console.log("case".padEnd(26) + "bands/true  align    line-overlap");
 console.log("-".repeat(66));
 
 let exact = 0;
+const results = new Map();
 for (const [label, opts] of cases) {
   const { data, truth } = makePage(opts);
-  const { bands } = bandsFromPixels(data, W, H);
+  const { bands, skew } = bandsFromPixels(data, W, H);
   const acc = score(bands, truth);
   const align = alignBandsToLines(bands, truth.map((_, i) => ({ id: "L" + i })));
   if (bands.length === truth.length) exact++;
+  results.set(label, { bands: bands.length, truth: truth.length, acc, align: align.confidence, skew });
   console.log(
     label.padEnd(26) +
       (bands.length + "/" + truth.length).padEnd(12) +
@@ -117,3 +119,31 @@ for (const [label, opts] of cases) {
 }
 console.log("-".repeat(66));
 console.log(`exact line-count match: ${exact}/${cases.length}`);
+
+/* The table above is the report; these are the promises. A page held crooked in
+   front of a phone is the common case, and before the projection was deskewed a
+   4° tilt collapsed eight lines into one band, reported "low", and withheld
+   every mark on the page. */
+let failures = 0;
+const t = (label, cond) => {
+  console.log("  " + (cond ? "PASS" : "FAIL") + "  " + label);
+  if (!cond) failures++;
+};
+
+console.log("\nwhat the measurement promises");
+t("every case but the touching-lines one finds its lines exactly", exact >= cases.length - 1);
+
+for (const label of ["slight skew (~0.6deg)", "moderate skew (~1.7deg)", "heavy skew (~4deg)"]) {
+  const r = results.get(label);
+  t(`${label}: lines are separated`, r.bands === r.truth);
+  t(`${label}: placement is usable`, r.align === "high" || r.align === "medium");
+  t(`${label}: bands cover the writing`, r.acc !== null && r.acc >= 0.8);
+  t(`${label}: the tilt is reported`, Math.abs(r.skew) > 0.2);
+}
+
+const clean = results.get("clean scan, 8 lines");
+t("a square page is not shorn", clean.skew === 0);
+t("and still reads exactly", clean.acc === 1);
+
+console.log(failures ? `\n${failures} FAILURE(S)` : "\nall geometry assertions passed");
+process.exitCode = failures ? 1 : 0;

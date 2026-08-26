@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "test": "node test/geometry.test.mjs && node test/marking.test.mjs && node test/pipeline.test.mjs && node test/keypool.test.mjs && node test/proxy.test.mjs"
+    "test": "node test/geometry.test.mjs && node test/identity.test.mjs && node test/choice.test.mjs && node test/marking.test.mjs && node test/pipeline.test.mjs && node test/keypool.test.mjs && node test/proxy.test.mjs"
   },
   "dependencies": {
     "react": "^19.2.0",
