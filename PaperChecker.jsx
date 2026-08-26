@@ -1,14 +1,27 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 
-import { structureOcr } from "./src/engine/ocr.js";
+import { structureOcr, linesToText } from "./src/engine/ocr.js";
 import { groqChat, GroqError, OCR_MODEL, EVAL_MODEL } from "./src/engine/groq.js";
 import { createLlm } from "./src/engine/llm.js";
 import { loadPdfJs, extractPdfText } from "./src/engine/pdf.js";
+import { isDocx, isLegacyDoc, extractDocxText, LEGACY_DOC_MESSAGE } from "./src/engine/docx.js";
 import { extractExamWithLlm, validateExam, structuralMarks, deriveMarks } from "./src/engine/exam.js";
 import { chunkDocument, createRetriever } from "./src/engine/reference.js";
 import { matchAnswers } from "./src/engine/match.js";
-import { assessPaper, summarisePaper, toEvaluation, GROUNDING } from "./src/engine/assess.js";
+import { applyChoice, describeChoice } from "./src/engine/choice.js";
+import {
+  assessPaper,
+  summarisePaper,
+  toEvaluation,
+  gradeFor,
+  answerStatus,
+  ANSWER_STATUS,
+  GROUNDING,
+  pairReferenceAnswers,
+} from "./src/engine/assess.js";
 import { extractJson } from "./src/engine/json.js";
+import { normalizeText } from "./src/engine/text.js";
+import { unionBoxes } from "./src/engine/geometry.js";
 import {
   anchorAnnotations,
   measurePages,
@@ -58,7 +71,10 @@ const EVAL_EFFORT = "medium";
 const MAX_EDGE = 2000;
 const JPEG_QUALITY = 0.85;
 const MAX_B64_CHARS = 3500000;
-const MAX_PAGES = 12;
+/* An answer booklet runs longer than a handful of pages, and a paper cut short
+   is a paper marked wrong. The cap exists only to bound browser memory; when it
+   bites, the upload says so instead of quietly losing the tail. */
+const MAX_PAGES = 30;
 
 /* ------------------------------------------------------------ presentation */
 const REVEAL_MS = 300; // gap between each highlight appearing
@@ -70,10 +86,29 @@ const PASS_THRESHOLD = 0.4; // 40% and above earns the PASS stamp
 const HISTORY_KEY = "qiq.paperchecker.history.v1";
 const HISTORY_LIMIT = 5;
 
+/* Three things downstream depend on this transcript, and each one used to be
+   left to chance:
+     · the question labels the student wrote are the strongest route to matching
+       an answer to its question (95% confidence against ~70% for a model guess);
+     · one output line per written line is what the ink measurement is aligned
+       against — reflowed prose makes the line count disagree with the bands and
+       the marks lose their place on the page;
+     · "[illegible]" is what the legibility score in ocr.js reads, and nothing
+       was asking the transcriber to produce it, so a guessed word and a clearly
+       read one scored the same. */
 const OCR_SYSTEM =
-  "You are an OCR engine. Extract ALL text from this student answer paper exactly as written, " +
-  "including handwriting. Preserve paragraph structure. Do not correct spelling, do not summarise, " +
-  "do not add commentary. Return only the extracted text.";
+  "You are an OCR engine transcribing a student's handwritten answer paper. Follow these rules:\n" +
+  "- Transcribe exactly what is written. Do not correct spelling or grammar, do not summarise, " +
+  "do not explain, do not add commentary.\n" +
+  "- Output ONE line of text for each line written on the page, in reading order. Do not merge " +
+  "lines and do not re-wrap them: this transcript is aligned against the page image line by line.\n" +
+  "- Keep the student's own question numbers and labels exactly as written and at the start of " +
+  "the line they appear on: \"1.\", \"Q3\", \"(a)\", \"iii)\".\n" +
+  "- Keep mathematics, equations, units and symbols as written, in plain text.\n" +
+  "- Where handwriting is genuinely unreadable, write [illegible] in place of that word. Never " +
+  "invent a word to fill a gap.\n" +
+  "- Add nothing the student did not write — no page headers, no numbering, no notes.\n" +
+  "Return only the transcript.";
 
 const EVAL_SYSTEM =
   "You are an experienced school/college teacher and examiner with 20 years of experience. " +
@@ -119,10 +154,20 @@ const TYPE_STYLE = {
 const typeStyle = (t) => TYPE_STYLE[t] || TYPE_STYLE.partial;
 
 /** The floating badge text on a highlight: "+2", "~1", "✗0". */
+/* The badge states a mark only when there is one to state. An annotation the
+   model gave no marks for used to render as "+0" — a correct point stamped with
+   a zero it never earned. With no number the verdict shows on its own. */
 function marksBadge(ann) {
-  const n = Number(ann.marks);
-  return typeStyle(ann.type).sign + (Number.isFinite(n) ? n : 0);
+  const style = typeStyle(ann.type);
+  const n = Number(ann && ann.marks);
+  if (!Number.isFinite(n) || n === 0) return style.icon;
+  return style.sign + Math.abs(n);
 }
+
+const hasMarks = (ann) => {
+  const n = Number(ann && ann.marks);
+  return Number.isFinite(n) && n !== 0;
+};
 
 const isLowConfidence = (ann) => {
   const c = Number(ann && ann.confidence);
@@ -223,6 +268,7 @@ async function rasterizePdf(file) {
   const doc = await lib.getDocument({ data }).promise;
   const count = Math.min(doc.numPages, MAX_PAGES);
   const pages = [];
+  // The caller is told the true length so a truncated upload can be reported.
 
   for (let i = 1; i <= count; i++) {
     const page = await doc.getPage(i);
@@ -245,7 +291,7 @@ async function rasterizePdf(file) {
       height: canvas.height,
     });
   }
-  return pages;
+  return { pages, total: doc.numPages };
 }
 
 /* Annotation matching and page geometry live in src/engine/marking.js. */
@@ -461,6 +507,9 @@ function ConfidenceFlag({ confidence, compact }) {
 
 export default function PaperChecker() {
   const [pages, setPages] = useState([]); // { id, label, dataUrl }
+  /* A Word upload carries digital text, so it skips rasterising and the vision
+     pass entirely — `textDoc` holds it until Check Paper runs. */
+  const [textDoc, setTextDoc] = useState(null); // { name, text } | null
   const [dragging, setDragging] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [expectedAnswer, setExpectedAnswer] = useState("");
@@ -473,7 +522,11 @@ export default function PaperChecker() {
   const [reportDate, setReportDate] = useState(todayLabel);
 
   const [studentAnswerText, setStudentAnswerText] = useState("");
-  const [editedText, setEditedText] = useState("");
+  /* The transcript is held per page, because the page boundaries are what the
+     ink measurements are attached to. Holding it as one string meant an edit on
+     a multi-page paper destroyed those boundaries and the whole overlay was
+     dropped for the re-grade. The joined form below is derived, never stored. */
+  const [editedPages, setEditedPages] = useState([]);
   const [evaluation, setEvaluation] = useState(null);
   const [evalRun, setEvalRun] = useState(0); // bumps per result; drives replays
   const [rawResponse, setRawResponse] = useState("");
@@ -486,6 +539,31 @@ export default function PaperChecker() {
      transcript of it. */
   const [pageBands, setPageBands] = useState({});
   const [ocrDoc, setOcrDoc] = useState(null);
+
+  /* The run's own account of itself. Every entry is something that actually
+     happened — a page read, a question matched, a mark decided — with the
+     number that came back from it. It is written as the work happens, so what
+     the examiner watches is the pipeline, not an animation of one. */
+  /* Uploads that did not fit, kept on screen rather than flashed once: a paper
+     that lost pages is marked on less than the student wrote, and the examiner
+     has to know before the marks are read. */
+  const [truncated, setTruncated] = useState([]);
+
+  const [trace, setTrace] = useState([]);
+  const traceStart = useRef(0);
+  const step = (text, detail = "", kind = "info") =>
+    setTrace((t) =>
+      t.concat({
+        at: (Date.now() - traceStart.current) / 1000,
+        text,
+        detail,
+        kind,
+      })
+    );
+  const beginTrace = () => {
+    traceStart.current = Date.now();
+    setTrace([]);
+  };
   const [geometryByPage, setGeometryByPage] = useState({});
 
   /* The question paper drives everything: it says what was asked, how many
@@ -500,6 +578,11 @@ export default function PaperChecker() {
   /* Reference material, chunked and indexed locally. */
   const [refFiles, setRefFiles] = useState([]); // { name, chunks, pageCount }
   const [refChunks, setRefChunks] = useState([]);
+  /* The reference material's own text, kept beside the search index. A textbook
+     is searched by topic; a set of model answers is filed by question number,
+     and that number is the strongest link there is between what was asked and
+     what a full-mark answer says. */
+  const [refText, setRefText] = useState("");
   const [refBusy, setRefBusy] = useState(false);
 
   const [markProgress, setMarkProgress] = useState({ done: 0, total: 0, label: "" });
@@ -516,6 +599,28 @@ export default function PaperChecker() {
   const [revealed, setRevealed] = useState(0); // how many annotations are visible
   const [history, setHistory] = useState(loadHistory);
 
+  /* The examiner's decisions. The AI proposes a mark per key point; the human
+     final mark is whatever the examiner sets, falling back to the proposal.
+     Keyed by key-point index, reset with every new result. */
+  const [markOverrides, setMarkOverrides] = useState({});
+
+  /* Which question the examiner is inspecting on the page. This is the single
+     source of truth for the page viewer: the page, the visible annotation
+     boxes and the margin notes are all derived from it — nothing keeps its own
+     copy that could go stale. null means "show everything". */
+  const [selectedQuestionId, setSelectedQuestionId] = useState(null);
+
+  /* Real pipeline progress. `phase` moves only when the corresponding work
+     actually runs; `coverageInfo` is filled the moment answer matching
+     finishes, so the processing screen can say "3 of 5 answers detected"
+     while marking is still underway. */
+  const [phase, setPhase] = useState("idle"); // ocr | measure | match | mark | review
+  const [coverageInfo, setCoverageInfo] = useState(null);
+
+  /* The history row belonging to the result on screen, so examiner mark
+     adjustments can be written back to it without disturbing older entries. */
+  const [activeHistoryId, setActiveHistoryId] = useState(null);
+
   const busy = stage === "ocr" || stage === "evaluating";
 
   useEffect(() => {
@@ -526,21 +631,170 @@ export default function PaperChecker() {
   }, [busy]);
 
   const pipelineStep =
-    stage === "ocr" ? 1 : stage === "evaluating" ? 2 : stage === "done" ? 3 : pages.length ? 1 : 0;
+    stage === "ocr" ? 1 : stage === "evaluating" ? 2 : stage === "done" ? 3 : pages.length || textDoc ? 1 : 0;
 
   /* --------------------------------------------------------------- derive -- */
+  const editedText = editedPages.join("\n\n");
+
   const annotations = evaluation && Array.isArray(evaluation.annotations) ? evaluation.annotations : [];
   const keyPoints = evaluation && Array.isArray(evaluation.keyPoints) ? evaluation.keyPoints : [];
 
-  const scoreTotal = Number(evaluation && evaluation.totalMarks) || Number(totalMarks) || 0;
+  /* Human-adjusted marks win wherever the examiner set one. The AI total only
+     survives untouched when there is no per-point breakdown to adjust. */
+  const overrideCount = Object.keys(markOverrides).length;
+  const keyPointAwarded = (k, i) =>
+    Number.isFinite(markOverrides[i]) ? markOverrides[i] : Number(k.marksAwarded) || 0;
+
+  /* "Answer any 3 of the following 5" is re-applied here, not just at marking
+     time, because the examiner can change a mark — and if they raise the fourth
+     attempt above the third, it is the fourth that should now count. The choice
+     follows the marks on screen. */
+  const choiceGroups = (evaluation && evaluation.choice) || [];
+  const chosen = choiceGroups.length
+    ? applyChoice(
+        keyPoints.map((k, i) => ({
+          questionId: k.questionId,
+          number: k.questionNumber,
+          maxMarks: k.marksTotal,
+          marksAwarded: keyPointAwarded(k, i),
+          skipped: k.skipped,
+          failed: k.failed,
+        })),
+        choiceGroups
+      )
+    : null;
+  const isCounted = (k) => !chosen || chosen.counted.has(k.questionId);
+
+  const scoreTotal = chosen
+    ? chosen.maximumMarks
+    : Number(evaluation && evaluation.totalMarks) || Number(totalMarks) || 0;
   const scoreAwarded = !evaluation
     ? 0
-    : Number.isFinite(Number(evaluation.totalMarksAwarded))
-    ? Number(evaluation.totalMarksAwarded)
-    : keyPoints.reduce((sum, k) => sum + (Number(k.marksAwarded) || 0), 0);
+    : keyPoints.length
+    ? keyPoints.reduce((sum, k, i) => sum + (isCounted(k) ? keyPointAwarded(k, i) : 0), 0)
+    : Number(evaluation.totalMarksAwarded) || 0;
+
+  /* Grade follows the marks on screen. Untouched results keep the engine's
+     grade (which came from the same scale); any override recomputes it. */
+  const effectiveGrade = !evaluation
+    ? "—"
+    : overrideCount > 0 && scoreTotal > 0
+    ? gradeFor((scoreAwarded / scoreTotal) * 100)
+    : evaluation.grade || "—";
+
+  /* What the report card and the review list render: the AI proposal, plus the
+     examiner's mark where one was given. `aiMarks` keeps the proposal visible
+     next to the examiner's decision. */
+  const displayKeyPoints = keyPoints.map((k, i) => {
+    const withOverride = Number.isFinite(markOverrides[i])
+      ? { ...k, aiMarks: k.marksAwarded, marksAwarded: markOverrides[i], overridden: true }
+      : k;
+    return chosen ? { ...withOverride, counted: isCounted(k) } : withOverride;
+  });
+
+  /* The selected question, derived from one id — never stored twice. The page
+     viewer, its boxes and its margin notes all read from this single lookup,
+     so a stale copy of "which question am I showing" cannot exist. */
+  const paperQuestions =
+    evaluation && evaluation.paper && Array.isArray(evaluation.paper.questions)
+      ? evaluation.paper.questions
+      : [];
+  const selectedQuestion = selectedQuestionId
+    ? paperQuestions.find((q) => q.questionId === selectedQuestionId) || null
+    : null;
+  const selectedPages =
+    selectedQuestion && Number.isFinite(selectedQuestion.pageStart)
+      ? Array.from(
+          {
+            length:
+              (Number.isFinite(selectedQuestion.pageEnd)
+                ? selectedQuestion.pageEnd
+                : selectedQuestion.pageStart) -
+              selectedQuestion.pageStart +
+              1,
+          },
+          (_, i) => selectedQuestion.pageStart + i
+        )
+      : null;
+
+  /* Where the selected question's answer physically sits, page by page: the
+     union of its own OCR lines' measured boxes. It is the same measurement the
+     annotation boxes are drawn from, so the outline and the marks inside it
+     cannot disagree — and a page whose lines were never measured simply
+     contributes no region rather than a guessed one. */
+  const selectedIndex = selectedQuestion ? paperQuestions.indexOf(selectedQuestion) : -1;
+  const selectedRegions =
+    selectedQuestion && ocrDoc && Array.isArray(selectedQuestion.lineIds)
+      ? (() => {
+          const ids = new Set(selectedQuestion.lineIds);
+          const byPage = new Map();
+          for (const line of ocrDoc.lines) {
+            if (!ids.has(line.id) || !line.bbox) continue;
+            if (!byPage.has(line.page)) byPage.set(line.page, []);
+            byPage.get(line.page).push(line.bbox);
+          }
+          return Array.from(byPage.entries())
+            .map(([page, boxes]) => ({ page, bbox: unionBoxes(boxes) }))
+            .filter((r) => r.bbox)
+            .sort((a, b) => a.page - b.page);
+        })()
+      : [];
+
+  /* The mark shown beside the question is the one that counts: the examiner's
+     where they set one, the AI's proposal otherwise. */
+  const selectedMark =
+    selectedIndex >= 0 && Number.isFinite(markOverrides[selectedIndex])
+      ? markOverrides[selectedIndex]
+      : selectedQuestion
+      ? selectedQuestion.marksAwarded
+      : null;
+
+  const viewQuestionOnPage = (k) => {
+    if (!k.questionId) return;
+    setSelectedQuestionId(k.questionId);
+    setTab("paper");
+  };
+
+  /* A new result invalidates the previous paper's decisions and selection. */
+  useEffect(() => {
+    setMarkOverrides({});
+    setSelectedQuestionId(null);
+  }, [evalRun]);
+
+  /* The examiner's marks are the final ones — write them back to this paper's
+     history row, keeping the AI's original proposal alongside so the log never
+     blurs who decided what. */
+  useEffect(() => {
+    if (!activeHistoryId || !evaluation) return;
+    setHistory((prev) => {
+      const idx = prev.findIndex((h) => h.id === activeHistoryId);
+      if (idx === -1) return prev;
+      const cur = prev[idx];
+      const aiScore = Number.isFinite(cur.aiScore) ? cur.aiScore : cur.score;
+      const finalScore = overrideCount > 0 ? scoreAwarded : aiScore;
+      if (cur.score === finalScore && (cur.overrides || 0) === overrideCount && cur.grade === effectiveGrade)
+        return prev;
+      const next = prev.slice();
+      next[idx] = { ...cur, aiScore, score: finalScore, overrides: overrideCount, grade: effectiveGrade };
+      saveHistory(next);
+      return next;
+    });
+  }, [scoreAwarded, overrideCount, effectiveGrade, activeHistoryId, evaluation]);
 
   const anchored = evaluation ? anchorAnnotations(studentAnswerText, annotations) : null;
   const lowConfidenceCount = annotations.filter(isLowConfidence).length;
+
+  /* What the Evaluate tab counts on its badge: questions the machine could not
+     settle (skipped, failed, low-confidence) plus pipeline warnings such as
+     unregistered writing. These are the rows the examiner must look at first. */
+  const reviewIssueCount = !evaluation
+    ? 0
+    : keyPoints.filter(
+        (k) => k.skipped || k.failed || (Number.isFinite(k.confidence) && k.confidence < LOW_CONFIDENCE)
+      ).length +
+      (evaluation.paper && Array.isArray(evaluation.paper.warnings)
+        ? evaluation.paper.warnings.length
+        : 0);
 
   /* Annotation index → boxes on the page images. Empty when the pages could not
      be measured, which is what makes the text view the honest fallback. */
@@ -581,17 +835,36 @@ export default function PaperChecker() {
     setError("");
     setPreparing(true);
     const collected = [];
+    const cut = [];
 
     for (const file of incoming) {
+      if (isLegacyDoc(file)) {
+        setError(LEGACY_DOC_MESSAGE(file.name));
+        continue;
+      }
+      if (isDocx(file)) {
+        /* Digital text, not ink: read it directly instead of paying a vision
+           pass to transcribe pixels. One Word document is the whole answer
+           paper, so the newest upload replaces the previous one. */
+        try {
+          const text = await extractDocxText(file);
+          setTextDoc({ name: file.name, text });
+        } catch (e) {
+          setError(e.message || `Could not read "${file.name}".`);
+        }
+        continue;
+      }
       const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
       const isImage = ACCEPTED_IMAGE_TYPES.includes(file.type);
       if (!isPdf && !isImage) {
-        setError(`"${file.name}" is not supported. Upload a PDF or a JPG / PNG / GIF / WEBP image.`);
+        setError(`"${file.name}" is not supported. Upload a PDF, a Word (.docx) file, or a JPG / PNG / GIF / WEBP image.`);
         continue;
       }
       try {
-        const produced = isPdf ? await rasterizePdf(file) : await rasterizeImage(file);
-        collected.push(...produced);
+        const produced = isPdf ? await rasterizePdf(file) : { pages: await rasterizeImage(file), total: 1 };
+        if (produced.total > produced.pages.length)
+          cut.push({ scope: "answer", name: file.name, kept: produced.pages.length, total: produced.total });
+        collected.push(...produced.pages);
       } catch (e) {
         setError(e.message || `Could not read "${file.name}".`);
       }
@@ -602,12 +875,13 @@ export default function PaperChecker() {
       setPages((prev) => {
         const merged = prev.concat(collected.map((p, i) => ({ ...p, id: `${stamp}-${i}` })));
         if (merged.length > MAX_PAGES) {
-          setError(`Only the first ${MAX_PAGES} pages are kept.`);
+          cut.push({ scope: "answer", name: "this upload", kept: MAX_PAGES, total: merged.length });
           return merged.slice(0, MAX_PAGES);
         }
         return merged;
       });
     }
+    setTruncated((prev) => prev.filter((x) => x.scope !== "answer").concat(cut));
     setPreparing(false);
   }
 
@@ -615,8 +889,9 @@ export default function PaperChecker() {
 
   function resetAll() {
     setPages([]);
+    setTextDoc(null);
     setStudentAnswerText("");
-    setEditedText("");
+    setEditedPages([]);
     setEvaluation(null);
     setRawResponse("");
     setReasoning("");
@@ -630,6 +905,8 @@ export default function PaperChecker() {
     setOcrDoc(null);
     setGeometryByPage({});
     setMarkProgress({ done: 0, total: 0, label: "" });
+    setTruncated([]);
+    setTrace([]);
     setTab("paper");
   }
 
@@ -643,16 +920,32 @@ export default function PaperChecker() {
     setExamBusy(true);
     try {
       const collected = [];
+      const digitalTexts = [];
+      const cut = [];
       for (const file of Array.from(files || [])) {
+        if (isLegacyDoc(file)) {
+          setError(LEGACY_DOC_MESSAGE(file.name));
+          continue;
+        }
+        if (isDocx(file)) {
+          /* A Word question paper already carries its text — read it directly
+             instead of spending a vision pass per page. */
+          digitalTexts.push(await extractDocxText(file));
+          continue;
+        }
         const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
         const isImage = ACCEPTED_IMAGE_TYPES.includes(file.type);
         if (!isPdf && !isImage) {
-          setError(`"${file.name}" is not a supported question paper. Upload a PDF or an image.`);
+          setError(`"${file.name}" is not a supported question paper. Upload a PDF, a Word (.docx) file, or an image.`);
           continue;
         }
-        collected.push(...(isPdf ? await rasterizePdf(file) : await rasterizeImage(file)));
+        const produced = isPdf ? await rasterizePdf(file) : { pages: await rasterizeImage(file), total: 1 };
+        if (produced.total > produced.pages.length)
+          cut.push({ scope: "question", name: file.name, kept: produced.pages.length, total: produced.total });
+        collected.push(...produced.pages);
       }
-      if (collected.length === 0) return;
+      setTruncated((prev) => prev.filter((x) => x.scope !== "question").concat(cut));
+      if (collected.length === 0 && digitalTexts.length === 0) return;
 
       const withIds = collected.map((p, i) => ({ ...p, id: `qp-${Date.now()}-${i}` }));
       setExamPages(withIds);
@@ -662,7 +955,7 @@ export default function PaperChecker() {
       /* A digital question paper already carries its text; only scans need the
          vision pass. Either way the model reads the structure, and segment.js
          re-reads the printed marks independently as a cross-check. */
-      const pageTexts = [];
+      const pageTexts = digitalTexts.slice();
       for (let i = 0; i < withIds.length; i++) {
         setNotice(`Reading question paper page ${i + 1} of ${withIds.length}…`);
         pageTexts.push(
@@ -679,7 +972,12 @@ export default function PaperChecker() {
 
       const doc = structureOcr(pageTexts);
       const raw = await extractExamWithLlm(doc.text, llm);
-      const validated = validateExam(raw, { structural: structuralMarks(doc.lines) });
+      /* The paper's own lines go in too: the rubric that says "answer any 3 of
+         the following 5" is printed on it, and the total depends on reading it. */
+      const validated = validateExam(raw, {
+        structural: structuralMarks(doc.lines),
+        lines: doc.lines,
+      });
 
       setExam(validated);
       setNotice("");
@@ -707,7 +1005,27 @@ export default function PaperChecker() {
       /* Recompute the mark-dependent warnings too, so the "enter the missing
          marks" notice disappears the moment they are entered instead of
          standing there contradicting the filled-in boxes. */
-      return { ...prev, ...deriveMarks(questions, prev.declaredTotal, prev.baseWarnings) };
+      return {
+        ...prev,
+        ...deriveMarks(questions, prev.declaredTotal, prev.baseWarnings, prev.choice),
+      };
+    });
+  }
+
+  /** Correct a misread "answer any N" — the denominator depends on it. */
+  function setChoiceRequired(index, value) {
+    setExam((prev) => {
+      if (!prev || !Array.isArray(prev.choice) || !prev.choice[index]) return prev;
+      const group = prev.choice[index];
+      const n = Number(value);
+      if (!Number.isFinite(n) || n < 1 || n > group.numbers.length) return prev;
+
+      const choice = prev.choice.map((g, i) => (i === index ? { ...g, required: n } : g));
+      return {
+        ...prev,
+        choice,
+        ...deriveMarks(prev.questions, prev.declaredTotal, prev.baseWarnings, choice),
+      };
     });
   }
 
@@ -724,30 +1042,79 @@ export default function PaperChecker() {
     try {
       const added = [];
       const chunks = [];
+      const texts = [];
+      const cut = [];
 
       for (const file of Array.from(files || [])) {
+        if (isLegacyDoc(file)) {
+          setError(LEGACY_DOC_MESSAGE(file.name));
+          continue;
+        }
+        if (isDocx(file)) {
+          const text = await extractDocxText(file);
+          const produced = chunkDocument(text, { source: file.name, page: 1 });
+          texts.push(text);
+          chunks.push(...produced);
+          added.push({ name: file.name, chunks: produced.length, pageCount: 1 });
+          continue;
+        }
         if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
-          setError(`"${file.name}" is not a PDF. Reference material must be a PDF.`);
+          setError(`"${file.name}" is not supported. Reference material must be a PDF or a Word (.docx) file.`);
           continue;
         }
-        const { pages, hasText, pageCount } = await extractPdfText(file);
+        let { pages, hasText, pageCount } = await extractPdfText(file);
+
+        /* A scanned textbook used to be refused outright, which meant the paper
+           was then marked with no reference material at all — the failure the
+           whole retrieval stage exists to prevent. It costs one vision call per
+           page, so the user is told that is what is happening. */
         if (!hasText) {
-          setError(
-            `"${file.name}" has no text layer — it looks like a scan. Reference material needs a ` +
-              `text-based PDF so it can be searched.`
-          );
-          continue;
+          const raster = await rasterizePdf(file);
+          if (raster.total > raster.pages.length)
+            cut.push({
+              scope: "reference",
+              name: file.name,
+              kept: raster.pages.length,
+              total: raster.total,
+            });
+
+          const llm = createLlm({ onRetry });
+          const read = [];
+          for (let i = 0; i < raster.pages.length; i++) {
+            setNotice(
+              `"${file.name}" is a scan — reading page ${i + 1} of ${raster.pages.length} with the vision model…`
+            );
+            read.push(
+              await llm.callText({
+                stage: "reference OCR",
+                system: OCR_SYSTEM,
+                user:
+                  "Extract all text from this page of reference material, preserving any question " +
+                  "or section numbering exactly as printed.",
+                maxTokens: OCR_MAX_TOKENS,
+                model: OCR_MODEL,
+                images: [raster.pages[i].dataUrl],
+              })
+            );
+          }
+          setNotice("");
+          pages = read;
+          pageCount = raster.pages.length;
         }
+
         const produced = pages.flatMap((text, i) =>
           chunkDocument(text, { source: file.name, page: i + 1 })
         );
+        texts.push(pages.join("\n\n"));
         chunks.push(...produced);
-        added.push({ name: file.name, chunks: produced.length, pageCount });
+        added.push({ name: file.name, chunks: produced.length, pageCount, scanned: !hasText });
       }
 
+      setTruncated((prev) => prev.filter((x) => x.scope !== "reference").concat(cut));
       if (added.length) {
         setRefFiles((prev) => prev.concat(added));
         setRefChunks((prev) => prev.concat(chunks));
+        setRefText((prev) => (prev ? prev + "\n\n" : "") + texts.join("\n\n"));
       }
     } catch (e) {
       setError(e.message || String(e));
@@ -759,6 +1126,7 @@ export default function PaperChecker() {
   function clearReferences() {
     setRefFiles([]);
     setRefChunks([]);
+    setRefText("");
   }
 
   const onRetry = (seconds) =>
@@ -834,6 +1202,12 @@ export default function PaperChecker() {
       // student never wrote — the examiner could quote it and then no highlight
       // could ever be placed on it.
       chunks.push(text);
+      const read = String(text || "");
+      step(
+        `Read page ${i + 1} of ${pages.length}`,
+        `${read.length} characters · ${read.split(/\n/).filter((l) => l.trim()).length} lines`,
+        read.trim() ? "ok" : "warn"
+      );
       setOcrProgress({ done: i + 1, total: pages.length });
     }
 
@@ -886,6 +1260,11 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
   "improvementAreas": ["short topic name per item, e.g. 'Sites of the light and dark reaction'"]
 }`;
 
+    step(
+      "Evaluating against the marking scheme",
+      `${marks} marks · ${answerText.length} characters of answer`
+    );
+
     let out;
     try {
       out = await groqChat(
@@ -914,7 +1293,13 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
     setRawResponse(out.text);
     setReasoning(out.reasoning);
-    return extractJson(out.text);
+    const parsed = extractJson(out.text);
+    step(
+      "Evaluation returned",
+      `${(parsed.keyPoints || []).length} key point(s) · ${(parsed.annotations || []).length} annotation(s)`,
+      "ok"
+    );
+    return parsed;
   }
 
   /** Append this result to the rolling five-paper log. */
@@ -930,8 +1315,13 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
       studentName: studentName.trim() || "Unnamed student",
       subject: subject.trim() || "—",
       score,
+      aiScore: score, // the machine's proposal, preserved when the examiner adjusts
+      overrides: 0,
       totalMarks: total,
       grade: result.grade || "—",
+      /* Questions the machine could not mark. The score is still logged, but a
+         row carrying pending marks is not a finished result and says so. */
+      pending: kp.filter((k) => k.failed).length,
       date: todayLabel(),
     };
 
@@ -940,6 +1330,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
       saveHistory(next);
       return next;
     });
+    setActiveHistoryId(entry.id);
   }
 
   /** Returns the first problem plus which field caused it, so the UI can point at it. */
@@ -984,7 +1375,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
       return;
     }
 
-    const problem = validate({ needPages: true, needScheme: !examMode });
+    const problem = validate({ needPages: !textDoc, needScheme: !examMode });
     if (problem) {
       reportProblem(problem);
       return;
@@ -994,35 +1385,89 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
     setError("");
     setEvaluation(null);
     setActiveAnn(null);
+    beginTrace();
+    step(
+      pages.length ? `Starting on ${pages.length} page${pages.length === 1 ? "" : "s"}` : "Starting on a text document",
+      examMode ? `${exam.questions.length} question${exam.questions.length === 1 ? "" : "s"} on the paper` : "",
+      "start"
+    );
 
     try {
+      if (textDoc && pages.length === 0) {
+        /* The Word document's own text is the ground truth, so there is no
+           vision pass and no ink geometry. The annotated text view is where
+           marks land when there is no page image to draw them on. */
+        setStage("evaluating");
+        setCoverageInfo(null);
+        if (!examMode) setPhase("mark");
+        const doc = structureOcr([textDoc.text]);
+        setPageBands({});
+        setOcrDoc(doc);
+        setGeometryByPage({});
+        setStudentAnswerText(doc.text);
+        setEditedPages([doc.text]);
+
+        const result = examMode
+          ? await runExamEvaluation(doc)
+          : await runEvaluation(doc.text);
+
+        setEvaluation(result);
+        setEvalRun((n) => n + 1);
+        recordHistory(result);
+        setStage("done");
+        setTab("review");
+        return;
+      }
+
       setStage("ocr");
+      setPhase("ocr");
+      setCoverageInfo(null);
       const pageTexts = await runOcr();
 
       /* Read the ink while the vision result is still fresh. This is local
          canvas work, not a network call, so it costs no tokens and cannot fail
          the run — an unmeasurable page simply loses its overlay. */
+      setPhase("measure");
       const measured = await measurePages(pages);
       const doc = structureOcr(pageTexts);
       const confidence = attachGeometry(doc, measured);
+
+      for (let p = 1; p <= doc.pageCount; p++) {
+        const bands = measured[p] && measured[p].bands ? measured[p].bands.length : 0;
+        const lines = doc.lines.filter((l) => l.page === p).length;
+        const skew = measured[p] && Number.isFinite(measured[p].skew) ? measured[p].skew : 0;
+        step(
+          `Measured page ${p}`,
+          `${bands} ink band${bands === 1 ? "" : "s"} vs ${lines} line${lines === 1 ? "" : "s"} — placement ${confidence[p]}` +
+            (Math.abs(skew) > 0.2 ? ` · page was ${Math.abs(skew)}° crooked, corrected` : ""),
+          confidence[p] === "high" || confidence[p] === "medium" ? "ok" : "warn"
+        );
+      }
 
       setPageBands(measured);
       setOcrDoc(doc);
       setGeometryByPage(confidence);
       setStudentAnswerText(doc.text);
-      setEditedText(doc.text);
+      setEditedPages(pageTexts.slice());
 
       setStage("evaluating");
+      if (!examMode) setPhase("mark");
       const result = examMode
         ? await runExamEvaluation(doc)
         : await runEvaluation(doc.text);
 
+      step(
+        "Finished",
+        `${result.totalMarksAwarded ?? "—"}/${result.totalMarks ?? "—"} · grade ${result.grade || "—"}`,
+        "ok"
+      );
       setEvaluation(result);
       setEvalRun((n) => n + 1);
       recordHistory(result);
       setStage("done");
-      setTab("paper");
+      setTab("review");
     } catch (e) {
+      step("Run stopped", e.message || String(e), "warn");
       setError(e.message || String(e));
       setStage(studentAnswerText ? "done" : "idle");
     } finally {
@@ -1041,11 +1486,99 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
     const llm = createLlm({ onRetry });
     const warnings = [];
 
-    const { answers } = await matchAnswers(doc, exam, { llm, warnings });
+    setPhase("match");
+    step("Matching answers to questions", `${exam.questions.length} questions · ${doc.lines.length} lines of writing`);
+    const { answers, unassignedLineIds } = await matchAnswers(doc, exam, { llm, warnings });
+
+    /* One line per question, saying how it was found and how much that route is
+       worth. This is the step that decides what gets marked at all, so it is
+       the one worth watching. */
+    for (const a of answers) {
+      const where =
+        Number.isFinite(a.pageStart) && a.pageStart > 0
+          ? a.pageEnd && a.pageEnd !== a.pageStart
+            ? ` · pages ${a.pageStart}–${a.pageEnd}`
+            : ` · page ${a.pageStart}`
+          : "";
+      step(
+        `Q${a.number}`,
+        a.skipped
+          ? "no answer found on the paper"
+          : `${a.method === "label" ? "found by its written number" : "located by the model"} · ` +
+            `${a.confidence}% confidence · ${a.answerText.length} characters${where}`,
+        a.skipped ? "warn" : "ok"
+      );
+    }
+
+    /* Writing that matched no question is how a missed answer actually looks.
+       Leftover boilerplate ("All the best", a name, a stray mark) is normal, so
+       only a substantial block is worth interrupting the examiner for. */
+    const leftoverText = linesToText(doc.lines, unassignedLineIds || []);
+    const unassignedChars = normalizeText(leftoverText).length;
+    const hasUnassignedWriting = unassignedChars >= 40;
+    if (hasUnassignedWriting) {
+      warnings.push(
+        `Possible missed answer: ${unassignedChars} characters of student writing ` +
+          `(${unassignedLineIds.length} line${unassignedLineIds.length === 1 ? "" : "s"}) could not be ` +
+          `assigned to any question. Review the Raw OCR Text tab before finalising marks.`
+      );
+    }
+
+    /* Answer coverage, known the moment matching finishes — before any marks
+       exist. This is what the processing screen and the Evaluate tab report. */
+    const coverage = {
+      total: answers.length,
+      detected: answers.filter(
+        (a) => answerStatus(a, { hasUnassignedWriting }) === ANSWER_STATUS.DETECTED
+      ).length,
+      verify: answers.filter((a) => {
+        const s = answerStatus(a, { hasUnassignedWriting });
+        return s === ANSWER_STATUS.UNCERTAIN || s === ANSWER_STATUS.NOT_DETECTED;
+      }).length,
+      unanswered: answers.filter(
+        (a) => answerStatus(a, { hasUnassignedWriting }) === ANSWER_STATUS.UNANSWERED
+      ).length,
+      hasUnassignedWriting,
+      unassignedChars,
+    };
+    if (hasUnassignedWriting)
+      step(
+        "Writing left over",
+        `${unassignedChars} characters on ${unassignedLineIds.length} line(s) belong to no question`,
+        "warn"
+      );
+    setCoverageInfo(coverage);
 
     const retriever = refChunks.length ? createRetriever(refChunks) : null;
     const concurrency = await poolSize();
 
+    /* Pair the reference's model answers to the paper's questions by number.
+       Where both sides carry the same number, the marking compares like with
+       like; where they do not, retrieval still supplies the topic. */
+    if (Array.isArray(exam.choice) && exam.choice.length)
+      step(
+        "Applying the paper's choice",
+        `${describeChoice(exam.choice)} — the total is out of ${exam.totalMarks}, not ${exam.printedMarks}`,
+        "start"
+      );
+
+    const referenceAnswers = pairReferenceAnswers(refText, exam.questions);
+    const paired = referenceAnswers.size;
+    if (refText.trim())
+      step(
+        "Paired reference answers to questions",
+        `${paired} of ${exam.questions.length} question(s) have a model answer under the same number` +
+          (paired < exam.questions.length ? " — the rest are marked from the retrieved passages" : ""),
+        paired > 0 ? "ok" : "warn"
+      );
+
+    setPhase("mark");
+    step(
+      "Marking each answer",
+      `${answers.filter((a) => !a.skipped).length} answer(s) to judge` +
+        (retriever ? ` · reference material available` : ` · no reference material`) +
+        ` · ${concurrency} in parallel`
+    );
     const paper = await assessPaper({
       exam,
       answers,
@@ -1053,22 +1586,38 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
       llm,
       warnings,
       concurrency,
+      referenceAnswers,
       // The scheme box doubles as the answer key in exam mode. Question papers
       // exported from question banks often have empty "Answer Key:" fields, and
       // without a key the examiner must re-derive every answer itself.
       answerKey: expectedAnswer,
-      onProgress: (done, total, label) => {
+      onProgress: (done, total, label, question) => {
         setMarkProgress({ done, total, label });
         setNotice(label ? `Marking ${label} — ${done + 1} of ${total}` : "");
+        if (!question) return;
+        step(
+          `Marked ${label}`,
+          question.failed
+            ? "evaluation failed — left unmarked for the examiner"
+            : `${question.marksAwarded}/${question.maxMarks} marks · ${question.grounding === GROUNDING.REFERENCE ? "supported by the reference" : question.grounding === GROUNDING.INSUFFICIENT ? "reference insufficient" : "general knowledge"} · ${question.confidence}% confidence`,
+          question.failed ? "warn" : "ok"
+        );
       },
     });
 
+    setPhase("review");
     setNotice("Writing the final remark…");
+    step("Writing the examiner's remark", `${paper.totalMarks}/${paper.maximumMarks} · grade ${paper.grade}`);
     const remark = await summarisePaper({ paper, llm });
 
     setRawResponse(JSON.stringify(paper, null, 2));
     setReasoning("");
-    return toEvaluation(paper, remark);
+    const evaluation = toEvaluation(paper, remark);
+    /* Detection context the UI needs to separate "the student wrote nothing"
+       from "we could not find what the student wrote". */
+    evaluation.hasUnassignedWriting = coverage.hasUnassignedWriting;
+    evaluation.unassignedChars = coverage.unassignedChars;
+    return evaluation;
   }
 
   /** Re-grade against an edited scheme or corrected OCR, skipping the vision pass. */
@@ -1088,29 +1637,33 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
     setError("");
     setActiveAnn(null);
+    beginTrace();
+    step("Re-grading", "the vision pass is skipped — marking the text as it stands now", "start");
     try {
       setStage("evaluating");
+      setCoverageInfo(null);
+      if (!examMode) setPhase("mark");
       setStudentAnswerText(text);
 
-      /* Corrected OCR text shifts every character offset, so the line index has
-         to be rebuilt before annotations can be traced back to the page. The
-         ink measurements still hold — only the text changed. On a single page
-         this stays exact. Across several pages an edit destroys the page
-         boundaries, and rather than guess at them we drop the overlay for this
-         run and say so. */
+      /* Corrected text shifts every character offset, so the line index has to be
+         rebuilt before annotations can be traced back to the page. The ink
+         measurements still hold — only the text changed — and because the
+         transcript is held per page, the page boundaries the measurements are
+         attached to survive the edit. That used to be true on a single page
+         only; a multi-page edit dropped the overlay entirely. */
+      const source = sourceText !== undefined ? [String(sourceText)] : editedPages;
       let doc = ocrDoc;
       let confidence = geometryByPage;
 
       if (!doc || text !== doc.text) {
-        if (pages.length <= 1) {
-          doc = structureOcr([text]);
-          confidence = attachGeometry(doc, pageBands);
-        } else {
-          doc = null;
-          confidence = {};
-        }
+        doc = structureOcr(source.length ? source : [text]);
+        confidence = attachGeometry(doc, pageBands);
         setOcrDoc(doc);
         setGeometryByPage(confidence);
+        step(
+          "Rebuilt the line index",
+          `${doc.lines.length} lines across ${doc.pageCount} page(s) — ink measurements reattached`
+        );
       }
 
       const result = examMode && doc ? await runExamEvaluation(doc) : await runEvaluation(text);
@@ -1118,7 +1671,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
       setEvalRun((n) => n + 1);
       recordHistory(result);
       setStage("done");
-      setTab(doc ? "paper" : "annotated");
+      setTab("review");
     } catch (e) {
       setError(e.message || String(e));
       setStage("done");
@@ -1172,7 +1725,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               <label className="qiq-drop qiq-drop-sm">
                 <input
                   type="file"
-                  accept="application/pdf,image/*"
+                  accept="application/pdf,image/*,.doc,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
                   multiple
                   hidden
                   onChange={(e) => {
@@ -1184,16 +1737,17 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                   {examBusy ? "Reading the question paper…" : "Upload the question paper"}
                 </div>
                 <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
-                  PDF, scan or photo — QIQ reads the questions and their marks
+                  PDF, Word, scan or photo — QIQ reads the questions and their marks
                 </div>
               </label>
+              <TruncatedNotice items={truncated.filter((x) => x.scope === "question")} />
               <div className="qiq-hint">
                 Optional. Without one, QIQ falls back to the marking-scheme flow below.
               </div>
             </>
           )}
 
-          {exam && <ExamPanel exam={exam} onMarks={setQuestionMarks} />}
+          {exam && <ExamPanel exam={exam} onMarks={setQuestionMarks} onChoice={setChoiceRequired} />}
 
           <SectionTitle
             n="2"
@@ -1209,7 +1763,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
           <label className="qiq-drop qiq-drop-sm">
             <input
               type="file"
-              accept="application/pdf"
+              accept="application/pdf,.doc,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
               multiple
               hidden
               onChange={(e) => {
@@ -1218,7 +1772,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               }}
             />
             <div style={{ fontSize: 13, fontWeight: 600 }}>
-              {refBusy ? "Indexing…" : "Add reference PDFs"}
+              {refBusy ? "Indexing…" : "Add reference files"}
             </div>
             <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
               Textbook, notes, syllabus or model answers — marked against these first
@@ -1235,12 +1789,22 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                   </span>
                   <span style={{ color: C.faint }}>
                     {f.pageCount}p · {f.chunks} chunks
+                    {f.scanned && (
+                      <span
+                        style={{ color: C.amber }}
+                        title="This PDF had no text layer, so each page was transcribed by the vision model. Retrieval is only as good as that transcription."
+                      >
+                        {" "}
+                        · read as a scan
+                      </span>
+                    )}
                   </span>
                 </div>
               ))}
               <div className="qiq-hint" style={{ marginTop: 2 }}>
                 {refChunks.length} searchable passages indexed locally.
               </div>
+              <TruncatedNotice items={truncated.filter((x) => x.scope === "reference")} />
             </div>
           )}
           {refFiles.length === 0 && (
@@ -1267,7 +1831,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
           >
             <input
               type="file"
-              accept="image/png,image/jpeg,image/gif,image/webp,application/pdf"
+              accept="image/png,image/jpeg,image/gif,image/webp,application/pdf,.doc,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
               multiple
               style={{ display: "none" }}
               onChange={(e) => {
@@ -1280,9 +1844,11 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               {preparing ? "Preparing pages…" : "Drop the answer sheet here"}
             </div>
             <div style={{ fontSize: 12, color: C.faint, marginTop: 4 }}>
-              or click to browse · PDF, JPG, PNG · handwriting supported
+              or click to browse · PDF, Word, JPG, PNG · handwriting supported
             </div>
           </label>
+
+          <TruncatedNotice items={truncated.filter((x) => x.scope === "answer")} />
 
           {pages.length > 0 && (
             <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
@@ -1302,6 +1868,25 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                   </button>
                 </div>
               ))}
+            </div>
+          )}
+
+          {textDoc && (
+            <div style={{ display: "grid", gap: 8, marginTop: 12 }}>
+              <div className="qiq-file">
+                <span className="qiq-reficon">📄</span>
+                <div style={{ minWidth: 0, flex: 1 }}>
+                  <div className="qiq-ellipsis" style={{ fontSize: 13, fontWeight: 500 }}>
+                    {textDoc.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.faint }}>
+                    Word document · text read directly, no OCR needed
+                  </div>
+                </div>
+                <button className="qiq-x" onClick={() => setTextDoc(null)} disabled={busy} title="Remove">
+                  ×
+                </button>
+              </div>
             </div>
           )}
 
@@ -1425,10 +2010,14 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
           {busy && (
             <Processing
               stage={stage}
+              phase={phase}
               elapsed={elapsed}
               progress={ocrProgress}
               notice={notice}
               marking={markProgress}
+              coverage={coverageInfo}
+              examMode={!!(exam && exam.questions.length)}
+              trace={trace}
             />
           )}
 
@@ -1438,6 +2027,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             <>
               <div className="qiq-tabs qiq-noprint">
                 {[
+                  ["review", "Evaluate"],
                   ["paper", "Marked Paper"],
                   ["annotated", "Annotated Text"],
                   ["score", "Report Card"],
@@ -1449,8 +2039,13 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     onClick={() => setTab(id)}
                   >
                     {label}
+                    {id === "review" && reviewIssueCount > 0 && (
+                      <span className="qiq-tab-warn" title={`${reviewIssueCount} item(s) need the examiner's attention`}>
+                        ⚠️ {reviewIssueCount}
+                      </span>
+                    )}
                     {id === "score" && (
-                      <span className="qiq-tab-badge" style={{ background: gradeColor(evaluation.grade) }}>
+                      <span className="qiq-tab-badge" style={{ background: gradeColor(effectiveGrade) }}>
                         {scoreAwarded}/{scoreTotal}
                       </span>
                     )}
@@ -1464,6 +2059,29 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               </div>
 
               <div className="qiq-tabbody">
+                {tab === "review" && (
+                  <ReviewPanel
+                    evaluation={evaluation}
+                    keyPoints={displayKeyPoints}
+                    markOverrides={markOverrides}
+                    onOverride={(i, value) =>
+                      setMarkOverrides((prev) => {
+                        const next = { ...prev };
+                        if (value === null) delete next[i];
+                        else next[i] = value;
+                        return next;
+                      })
+                    }
+                    awarded={scoreAwarded}
+                    total={scoreTotal}
+                    grade={effectiveGrade}
+                    hasPages={pages.length > 0}
+                    geometryByPage={geometryByPage}
+                    onViewOnPage={viewQuestionOnPage}
+                    onRetryEval={() => reEvaluate()}
+                    onShowRaw={() => setTab("raw")}
+                  />
+                )}
                 {tab === "paper" && (
                   <MarkedPaper
                     pages={pages}
@@ -1478,6 +2096,13 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     markingInProgress={markingInProgress}
                     onRevealAll={revealAll}
                     onShowText={() => setTab("annotated")}
+                    selectedQuestion={selectedQuestion}
+                    selectedPages={selectedPages}
+                    selectedRegions={selectedRegions}
+                    selectedMark={selectedMark}
+                    selectedOverridden={selectedIndex >= 0 && Number.isFinite(markOverrides[selectedIndex])}
+                    hasUnassignedWriting={!!evaluation.hasUnassignedWriting}
+                    onClearSelection={() => setSelectedQuestionId(null)}
                   />
                 )}
                 {tab === "annotated" && (
@@ -1494,9 +2119,11 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                 {tab === "score" && (
                   <ReportCard
                     evaluation={evaluation}
-                    keyPoints={keyPoints}
+                    keyPoints={displayKeyPoints}
                     awarded={scoreAwarded}
                     total={scoreTotal}
+                    grade={effectiveGrade}
+                    overrideCount={overrideCount}
                     runKey={evalRun}
                     studentName={studentName}
                     setStudentName={setStudentName}
@@ -1508,10 +2135,11 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                 )}
                 {tab === "raw" && (
                   <RawView
-                    text={editedText}
-                    setText={setEditedText}
+                    pageTexts={editedPages}
+                    setPageTexts={setEditedPages}
+                    geometryByPage={geometryByPage}
                     dirty={editedText !== studentAnswerText}
-                    onReEvaluate={() => reEvaluate(editedText)}
+                    onReEvaluate={() => reEvaluate()}
                     rawResponse={rawResponse}
                     reasoning={reasoning}
                   />
@@ -1543,57 +2171,137 @@ function EmptyState({ hasPages }) {
   );
 }
 
-function Processing({ stage, elapsed, progress, notice, marking }) {
+/**
+ * What the pipeline is doing, in the order it actually does it.
+ *
+ * The step list is driven by `phase`, which moves only when the corresponding
+ * work genuinely starts (ocr → measure → match → mark → review), so a lit step
+ * is a fact, not an animation. Coverage counts appear the moment answer
+ * matching finishes — the examiner learns "3 of 5 answers detected" while the
+ * marking is still running.
+ */
+function Processing({ stage, phase, elapsed, progress, notice, marking, coverage, examMode, trace = [] }) {
+  const order = examMode
+    ? ["ocr", "measure", "match", "mark", "review"]
+    : ["ocr", "measure", "mark"];
+
   const steps = [
     {
       id: "ocr",
-      title: "Reading the paper",
+      title: "Reading answer pages",
       sub:
         progress.total > 1
           ? `Transcribing page ${Math.min(progress.done + 1, progress.total)} of ${progress.total}, handwriting included`
           : "Vision model is transcribing the page, handwriting included",
     },
+    { id: "measure", title: "Detecting handwriting position", sub: "Measuring where the ink sits on each page" },
+    { id: "match", title: "Mapping answers to questions", sub: "Linking each block of writing to its question number" },
     {
-      id: "evaluating",
-      title: "Evaluating like a teacher",
-      /* Per-question marking is sequential and rate-limited, so a paper can sit
-         here for minutes. Saying which question is being marked is the
-         difference between "working" and "frozen". */
+      id: "mark",
+      title: "Evaluating answers",
       sub:
         marking && marking.total > 0
           ? `Marking ${marking.label || "question"} — ${Math.min(marking.done + 1, marking.total)} of ${marking.total}`
-          : "Reasoning through the marking scheme and partial credit at high effort",
+          : "Reasoning through the marking scheme and partial credit",
     },
-  ];
-  const current = steps.findIndex((s) => s.id === stage);
+    { id: "review", title: "Preparing examiner review", sub: "Writing the final remark and coverage summary" },
+  ].filter((s) => order.includes(s.id));
+
+  const current = Math.max(0, order.indexOf(phase === "idle" ? stage : phase));
+  const active = steps[current] || steps[steps.length - 1];
+
+  /* The feed follows the work. Newest at the bottom, like a log, because the
+     examiner is watching the front of the run rather than reading a history. */
+  const feed = useRef(null);
+  useEffect(() => {
+    if (feed.current) feed.current.scrollTop = feed.current.scrollHeight;
+  }, [trace.length, notice]);
+
+  const clock = (secs) => {
+    const s = Math.max(0, Math.floor(secs));
+    return `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  };
+  const mark = { ok: "✓", warn: "!", start: "▸", info: "·" };
 
   return (
-    <div className="qiq-empty">
-      <div className="qiq-orb" />
-      <div style={{ fontSize: 16, fontWeight: 600, marginTop: 22 }}>Checking the paper…</div>
-      <div style={{ fontSize: 12, color: C.faint, marginTop: 4 }}>{elapsed}s elapsed</div>
-
-      <div style={{ display: "grid", gap: 10, marginTop: 26, width: "min(440px, 100%)" }}>
-        {steps.map((s, i) => {
-          const done = i < current;
-          const active = i === current;
-          return (
-            <div key={s.id} className={`qiq-proc${active ? " is-active" : ""}`}>
-              <div className="qiq-proc-dot">
-                {done ? "✓" : active ? <span className="qiq-spinner" /> : i + 1}
-              </div>
-              <div style={{ textAlign: "left" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: done || active ? C.text : C.faint }}>
-                  {s.title}
-                </div>
-                <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>{s.sub}</div>
-              </div>
-            </div>
-          );
-        })}
+    <div className="qiq-run">
+      <div className="qiq-run-head">
+        <div className="qiq-orb" />
+        <div style={{ minWidth: 0 }}>
+          <div className="qiq-run-title">
+            {active ? active.title : "Checking the paper"}
+            <span className="qiq-run-ell" />
+          </div>
+          <div className="qiq-run-sub">{notice || (active ? active.sub : "")}</div>
+        </div>
+        <div className="qiq-run-clock">{clock(elapsed)}</div>
       </div>
 
-      {notice && <div className="qiq-notice">{notice}</div>}
+      {/* the phases, as a rail: where the run is, and what is still to come */}
+      <div className="qiq-rail">
+        {steps.map((s, i) => (
+          <div
+            key={s.id}
+            className={`qiq-rail-seg${i < current ? " is-done" : ""}${i === current ? " is-now" : ""}`}
+            title={s.title}
+          >
+            <span className="qiq-rail-bar" />
+            <span className="qiq-rail-label">{s.title.replace(/^(Reading|Detecting|Mapping|Evaluating|Preparing) /, "")}</span>
+          </div>
+        ))}
+      </div>
+
+      {/* what actually happened, as it happens */}
+      <div className="qiq-trace" ref={feed}>
+        {trace.length === 0 && <div className="qiq-trace-idle">Waking the pipeline…</div>}
+
+        {trace.map((e, i) => (
+          <div key={i} className={`qiq-trace-row is-${e.kind}`}>
+            <span className="qiq-trace-time">{clock(e.at)}</span>
+            <span className="qiq-trace-mark">{mark[e.kind] || "·"}</span>
+            <span className="qiq-trace-text">{e.text}</span>
+            {e.detail && <span className="qiq-trace-detail">{e.detail}</span>}
+          </div>
+        ))}
+
+        <div className="qiq-trace-row is-live">
+          <span className="qiq-trace-time">{clock(elapsed)}</span>
+          <span className="qiq-spinner" />
+          <span className="qiq-trace-text">{notice || (active ? active.sub : "Working")}</span>
+        </div>
+      </div>
+
+      {coverage && (
+        <div className="qiq-proc-coverage">
+          Questions: {coverage.total} · Answers detected: {coverage.detected} · Needs verification:{" "}
+          {coverage.verify}
+          {coverage.unanswered > 0 ? ` · No answer detected: ${coverage.unanswered}` : ""}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Pages an upload could not take. Shown next to the upload it belongs to and
+ * kept there: a paper that lost its last pages is being marked on less than the
+ * student wrote, and that is not a transient message.
+ */
+function TruncatedNotice({ items }) {
+  if (!items.length) return null;
+  return (
+    <div className="qiq-cut">
+      {items.map((x, i) => (
+        <div key={i}>
+          ⚠️ <strong>{x.name}</strong> has {x.total} pages — only the first {x.kept} were added.{" "}
+          {x.scope === "question"
+            ? "Questions past that point are not on the paper being marked."
+            : x.scope === "reference"
+            ? "Material past that point is not searchable and cannot support a mark."
+            : "Answers past that point will not be read or marked."}{" "}
+          Split the file and upload the rest as a second file.
+        </div>
+      ))}
     </div>
   );
 }
@@ -1618,16 +2326,20 @@ function HistoryPanel({ history, onClear }) {
 
       <div style={{ display: "grid", gap: 7 }}>
         {history.map((h, i) => {
-          /* Compare against the next entry down, which is the previous paper. */
-          const prev = history[i + 1];
+          /* Progress means one student against their own last paper. Comparing
+             the row above — whoever it belonged to — turned two different
+             students into a trend arrow that meant nothing. */
+          const prev = history.slice(i + 1).find((o) => o.studentName === h.studentName);
           const delta = prev ? pct(h) - pct(prev) : 0;
-          const trend = !prev ? "→" : delta > 1 ? "↑" : delta < -1 ? "↓" : "→";
+          const trend = !prev ? "•" : delta > 1 ? "↑" : delta < -1 ? "↓" : "→";
           const trendColor = !prev ? C.faint : delta > 1 ? C.green : delta < -1 ? C.red : C.faint;
 
           return (
             <div key={h.id} className="qiq-hist">
               <span className="qiq-hist-trend" style={{ color: trendColor }} title={
-                prev ? `${delta > 0 ? "+" : ""}${delta.toFixed(0)}% vs previous paper` : "First recorded paper"
+                prev
+                  ? `${delta > 0 ? "+" : ""}${delta.toFixed(0)}% vs this student's previous paper (${prev.score}/${prev.totalMarks}, ${prev.date})`
+                  : `First recorded paper for ${h.studentName}`
               }>
                 {trend}
               </span>
@@ -1637,12 +2349,22 @@ function HistoryPanel({ history, onClear }) {
                 </div>
                 <div className="qiq-ellipsis" style={{ fontSize: 10.5, color: C.faint }}>
                   {h.subject} · {h.date}
+                  {h.pending > 0 && (
+                    <span style={{ color: C.amber }} title="Some questions could not be marked automatically">
+                      {" "}
+                      · {h.pending} pending
+                    </span>
+                  )}
                 </div>
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+                  {h.overrides > 0 && <span title={`Examiner adjusted ${h.overrides} mark(s); the AI proposed ${h.aiScore}/${h.totalMarks}`}>✎ </span>}
                   {h.score}/{h.totalMarks}
                 </div>
+                {h.overrides > 0 && Number.isFinite(h.aiScore) && h.aiScore !== h.score && (
+                  <div style={{ fontSize: 9.5, color: C.faint }}>AI {h.aiScore}</div>
+                )}
                 <div style={{ fontSize: 10.5, fontWeight: 700, color: gradeColor(h.grade) }}>{h.grade}</div>
               </div>
             </div>
@@ -1678,8 +2400,9 @@ function GroundingBadge({ grounding }) {
  * paper did not print — showing the gap and letting the teacher fill it is the
  * honest alternative to a confident guess that then caps a real student's score.
  */
-function ExamPanel({ exam, onMarks }) {
+function ExamPanel({ exam, onMarks, onChoice }) {
   const missing = exam.questions.filter((q) => q.maxMarks === null).length;
+  const choice = Array.isArray(exam.choice) ? exam.choice : [];
 
   return (
     <div className="qiq-exam">
@@ -1697,9 +2420,41 @@ function ExamPanel({ exam, onMarks }) {
           <span style={{ fontSize: 17, fontWeight: 800, color: missing ? C.amber : C.green }}>
             {exam.totalMarks}
           </span>
-          <span style={{ fontSize: 10.5, color: C.faint, display: "block" }}>total marks</span>
+          <span style={{ fontSize: 10.5, color: C.faint, display: "block" }}>
+            {choice.length ? "marks to be earned" : "total marks"}
+          </span>
+          {choice.length > 0 && exam.printedMarks !== exam.totalMarks && (
+            <span style={{ fontSize: 9.5, color: C.faint, display: "block" }}>
+              {exam.printedMarks} printed
+            </span>
+          )}
         </div>
       </div>
+
+      {/* What the paper's own rubric says about choice, read off the page. The
+          number is editable because a misread rubric would otherwise score the
+          whole paper out of the wrong denominator, and the examiner is the one
+          who can see what is printed. */}
+      {choice.map((g, i) => (
+        <div key={i} className="qiq-choice">
+          <span>Answer any</span>
+          <input
+            className="qiq-exam-marks"
+            type="number"
+            min="1"
+            max={g.numbers.length}
+            value={g.required}
+            onChange={(e) => onChoice(i, e.target.value)}
+            aria-label="Number of questions the student must attempt"
+          />
+          <span>
+            of {g.numbers.length} — Q{g.numbers.join(", Q")}
+          </span>
+          <span className="qiq-choice-src" title={g.text}>
+            read from the paper
+          </span>
+        </div>
+      ))}
 
       <div className="qiq-exam-rows">
         {exam.questions.map((q) => (
@@ -1771,6 +2526,13 @@ function MarkedPaper({
   markingInProgress,
   onRevealAll,
   onShowText,
+  selectedQuestion = null,
+  selectedPages = null,
+  selectedRegions = [],
+  selectedMark = null,
+  selectedOverridden = false,
+  hasUnassignedWriting = false,
+  onClearSelection,
 }) {
   const focus = (idx) => {
     setActiveAnn(idx);
@@ -1778,12 +2540,27 @@ function MarkedPaper({
     if (el) el.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
+  /* A box on a page whose line measurement failed is a guess dressed up as a
+     fact. "high" and "medium" placements are shown (medium admits it may sit a
+     line off); "low" and "none" are withheld, and the marks live in the margin
+     instead — where they cannot point at the wrong handwriting. */
+  const pageTrusted = (pageNumber) =>
+    geometryByPage[pageNumber] === "high" || geometryByPage[pageNumber] === "medium";
+
+  /* When the examiner picked a question, only its annotations appear. The
+     filter reads ann.questionId — stamped at marking time — so no component
+     re-guesses which mark belongs to which question. */
+  const belongsToSelection = (idx) =>
+    !selectedQuestion || annotations[idx]?.questionId === selectedQuestion.questionId;
+
   /* One annotation can occupy boxes on more than one page, so the grouping is
      by page rather than by annotation. Top-to-bottom order keeps the tab key
      and the eye moving down the page together. */
   const boxesForPage = (pageNumber) => {
     const out = [];
+    if (!pageTrusted(pageNumber)) return out;
     for (const [key, list] of Object.entries(annBoxes)) {
+      if (!belongsToSelection(Number(key))) continue;
       for (const entry of list) {
         if (entry.page === pageNumber) out.push({ idx: Number(key), bbox: entry.bbox });
       }
@@ -1791,12 +2568,51 @@ function MarkedPaper({
     return out.sort((a, b) => a.bbox.y - b.bbox.y);
   };
 
+  const regionFor = (pageNumber) => selectedRegions.find((r) => r.page === pageNumber) || null;
+
+  /* A question's region is a block of writing, not a phrase, so a weak line
+     measurement is still worth drawing — being a line or two out around a whole
+     answer still points the examiner at the right paragraph. It is labelled
+     approximate rather than passed off as exact. Individual marks keep the
+     stricter gate: pointing at the wrong *phrase* is a different kind of wrong. */
+  const regionPlaceable = (pageNumber) =>
+    !!geometryByPage[pageNumber] && geometryByPage[pageNumber] !== "none";
+  const placedRegions = selectedRegions.filter((r) => regionPlaceable(r.page));
+
+  /* Navigate to the answer itself where it was measured, and only fall back to
+     the top of its first page when it was not. Derived from selectedQuestion —
+     set once by the Evaluate tab — never from a copy. */
+  useEffect(() => {
+    if (!selectedQuestion) return;
+    const region = selectedRegions.find((r) => regionPlaceable(r.page));
+    const el = region
+      ? document.getElementById(`qiq-region-${region.page}`)
+      : selectedPages && selectedPages.length
+      ? document.getElementById(`qiq-page-${selectedPages[0]}`)
+      : null;
+    if (el) el.scrollIntoView({ behavior: "smooth", block: region ? "center" : "start" });
+  }, [selectedQuestion && selectedQuestion.questionId]);
+
   /* Pages can be removed after a grading run, and an edited transcript drops the
      geometry on purpose. Either way this view has nothing to stand on. */
   const note = pages.length === 0
     ? "The pages have been removed, so there is nothing left to mark on."
     : GEOMETRY_NOTE[geometryLevel] || "";
-  const unplaceable = annotations.length - placedOnPage;
+
+  /* "Placed" means placed somewhere worth trusting. Boxes withheld because
+     their page failed the geometry check count as unplaced, so the header
+     never claims a mark is on the handwriting when it is not. */
+  const placedTrusted = annotations.filter(
+    (_, i) => annBoxes[i] && annBoxes[i].some((b) => pageTrusted(b.page))
+  ).length;
+  const unplaceable = annotations.length - placedTrusted;
+
+  /* Header counts follow the selection: with a question chosen they describe
+     that question's marks, not the paper's. */
+  const visibleIdx = annotations.map((_, i) => i).filter(belongsToSelection);
+  const placedVisible = visibleIdx.filter(
+    (i) => annBoxes[i] && annBoxes[i].some((b) => pageTrusted(b.page))
+  ).length;
 
   return (
     <div className="qiq-annot-wrap">
@@ -1804,13 +2620,17 @@ function MarkedPaper({
         <div className="qiq-subhead">
           <div>
             <div style={{ fontSize: 13, fontWeight: 700 }}>
-              The student's paper, marked
+              {selectedQuestion
+                ? `Q${selectedQuestion.number} on the page`
+                : "The student's paper, marked"}
               {markingInProgress && <span className="qiq-marking-dot" />}
             </div>
             <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
               {markingInProgress
                 ? `Marking… ${revealed} of ${annotations.length}`
-                : `${placedOnPage} of ${annotations.length} marks placed on the handwriting` +
+                : selectedQuestion
+                ? `${placedVisible} of ${visibleIdx.length} of this question's marks placed on the handwriting`
+                : `${placedTrusted} of ${annotations.length} marks placed on the handwriting` +
                   (unplaceable > 0 ? ` · ${unplaceable} in the margin` : "")}
             </div>
           </div>
@@ -1818,12 +2638,16 @@ function MarkedPaper({
             <button className="qiq-mini-btn" onClick={onRevealAll}>
               Skip animation
             </button>
+          ) : selectedQuestion ? (
+            <button className="qiq-mini-btn" onClick={onClearSelection}>
+              Show all questions
+            </button>
           ) : (
             <Legend />
           )}
         </div>
 
-        {note && (
+        {note && !selectedQuestion && (
           <div className="qiq-geom-note">
             <span aria-hidden="true">⚠️</span>
             <span>
@@ -1835,16 +2659,162 @@ function MarkedPaper({
           </div>
         )}
 
+        {/* What the examiner asked to see: the question itself, the mark it
+            carries, and where on the paper that mark was earned. Without this
+            the filtered page view is a set of highlights with no question
+            attached to them. */}
+        {selectedQuestion && (
+          <div className="qiq-qcard">
+            <div className="qiq-qcard-head">
+              <span className="qiq-qcard-num">Q{selectedQuestion.number}</span>
+              <span className="qiq-qcard-text">{selectedQuestion.questionText || "—"}</span>
+              <span className="qiq-qcard-marks">
+                {selectedMark === null || selectedMark === undefined ? "—" : selectedMark}
+                <span style={{ color: C.faint, fontWeight: 600 }}> / {selectedQuestion.maxMarks ?? "—"}</span>
+                {selectedOverridden && (
+                  <span style={{ display: "block", fontSize: 9.5, color: C.blue, fontWeight: 600 }}>
+                    ✎ examiner-set
+                  </span>
+                )}
+              </span>
+            </div>
+
+            <div className="qiq-qcard-where">
+              {(() => {
+                const st = answerStatus(selectedQuestion, {
+                  hasUnassignedWriting,
+                  lowConfidence: LOW_CONFIDENCE,
+                });
+                if (st === ANSWER_STATUS.FAILED)
+                  return <span style={{ color: C.red }}>⛔ This question could not be marked automatically.</span>;
+                if (st === ANSWER_STATUS.UNANSWERED)
+                  return <span style={{ color: C.faint }}>○ No answer was found anywhere on the paper.</span>;
+                if (st === ANSWER_STATUS.NOT_DETECTED)
+                  return (
+                    <span style={{ color: C.amber }}>
+                      ⚠ The answer could not be located on the page — there is unassigned writing, so it may
+                      simply have been missed.
+                    </span>
+                  );
+                if (placedRegions.length === 0)
+                  return (
+                    <span style={{ color: C.amber }}>
+                      ~ The answer was read, but this page's writing could not be measured — the answer as read
+                      is below, and this question's marks are listed in the margin.
+                    </span>
+                  );
+
+                const exact = placedRegions.every((r) => pageTrusted(r.page));
+                const where =
+                  placedRegions.length === 1
+                    ? `page ${placedRegions[0].page}`
+                    : `pages ${placedRegions.map((r) => r.page).join(", ")}`;
+                return (
+                  <span style={{ color: exact ? C.green : C.amber }}>
+                    {exact ? "✓" : "~"} Answer outlined on {where}
+                    {exact ? "" : " — placement approximate, the outline may sit a line or two out"}
+                    {" · "}
+                    {placedVisible} of {visibleIdx.length} mark{visibleIdx.length === 1 ? "" : "s"} pinned to the
+                    handwriting
+                  </span>
+                );
+              })()}
+            </div>
+
+            {selectedQuestion.rationale && (
+              <p className="qiq-qcard-why">
+                <span style={{ fontWeight: 700, color: C.dim }}>Why this mark: </span>
+                {selectedQuestion.rationale}
+              </p>
+            )}
+
+            {/* The answer itself, as the machine read it. When the page could
+                not be measured this is the only honest way to show "the answer
+                is here" — and when it could, it is still what the marks were
+                actually given for. */}
+            {selectedQuestion.answerText && (
+              <details className="qiq-qcard-answer" open={placedRegions.length === 0}>
+                <summary>
+                  Answer as read ({selectedQuestion.answerText.length} characters
+                  {Number.isFinite(selectedQuestion.confidence)
+                    ? ` · detection confidence ${selectedQuestion.confidence}%`
+                    : ""}
+                  )
+                </summary>
+                <p>{selectedQuestion.answerText}</p>
+              </details>
+            )}
+
+            {/* What was checked in it — the marks list on the right shows the
+                comments, this shows the judgement behind them. */}
+            {(selectedQuestion.correctPoints?.length ||
+              selectedQuestion.incorrectPoints?.length ||
+              selectedQuestion.missingPoints?.length) > 0 && (
+              <ul className="qiq-qcard-points">
+                {(selectedQuestion.correctPoints || []).map((p, j) => (
+                  <li key={`c${j}`} style={{ color: C.green }}>
+                    ✓ <span style={{ color: C.text }}>{p}</span>
+                  </li>
+                ))}
+                {(selectedQuestion.incorrectPoints || []).map((p, j) => (
+                  <li key={`e${j}`} style={{ color: C.red }}>
+                    ✗ <span style={{ color: C.text }}>{p}</span>
+                  </li>
+                ))}
+                {(selectedQuestion.missingPoints || []).map((p, j) => (
+                  <li key={`m${j}`} style={{ color: "#A855F7" }}>
+                    ! <span style={{ color: C.text }}>{p}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+
         <div className="qiq-pages">
           {pages.map((page, i) => {
             const pageNumber = i + 1;
             const boxes = boxesForPage(pageNumber);
+            const region = regionFor(pageNumber);
             const shown = boxes.filter((b) => b.idx < revealed).length;
+            const trusted = pageTrusted(pageNumber);
+            const inSelection = !selectedPages || selectedPages.includes(pageNumber);
 
             return (
-              <figure key={page.id} className="qiq-page-block">
+              <figure
+                key={page.id}
+                id={`qiq-page-${pageNumber}`}
+                className="qiq-page-block"
+                style={
+                  selectedPages && !inSelection
+                    ? { opacity: 0.35 } /* other pages stay for context, dimmed */
+                    : undefined
+                }
+              >
                 <div className="qiq-page-stage">
                   <img className="qiq-page-img" src={page.dataUrl} alt={`Page ${pageNumber}`} />
+
+                  {/* The selected question's own writing, outlined from the same
+                      line measurements the marks are placed with. Withheld on a
+                      page whose measurement is untrusted rather than drawn
+                      around the wrong paragraph. */}
+                  {region && regionPlaceable(pageNumber) && (
+                    <div
+                      id={`qiq-region-${pageNumber}`}
+                      className={`qiq-ans-region${trusted ? "" : " is-approx"}`}
+                      style={{
+                        left: `${Math.max(0, region.bbox.x - 0.015) * 100}%`,
+                        top: `${Math.max(0, region.bbox.y - 0.01) * 100}%`,
+                        width: `${Math.min(1, region.bbox.width + 0.03) * 100}%`,
+                        height: `${Math.min(1, region.bbox.height + 0.02) * 100}%`,
+                      }}
+                    >
+                      <span className="qiq-ans-region-tag">
+                        Q{selectedQuestion.number}
+                        {!trusted && " · approximate"}
+                      </span>
+                    </div>
+                  )}
 
                   {boxes.map(({ idx, bbox }) => {
                     /* Before its turn the box is not rendered at all, so the
@@ -1887,11 +2857,13 @@ function MarkedPaper({
                           <span style={{ color: s.color, fontWeight: 700 }}>
                             {s.icon} {s.label}
                           </span>
-                          {Number.isFinite(Number(ann.marks)) && (
+                          {hasMarks(ann) ? (
                             <span style={{ color: C.dim }}>
                               {" "}
                               · {ann.marks} mark{Math.abs(Number(ann.marks)) === 1 ? "" : "s"}
                             </span>
+                          ) : (
+                            <span style={{ color: C.faint }}> · marks not broken down</span>
                           )}
                           <span style={{ display: "block", marginTop: 5, color: C.text }}>
                             {ann.comment}
@@ -1914,8 +2886,10 @@ function MarkedPaper({
                     Page {pageNumber} of {pages.length}
                   </span>
                   <span style={{ color: C.faint }}>
-                    {shown} mark{shown === 1 ? "" : "s"}
-                    {geometryByPage[pageNumber] === "high" ? "" : " · approximate placement"}
+                    {trusted
+                      ? `${shown} mark${shown === 1 ? "" : "s"}` +
+                        (geometryByPage[pageNumber] === "high" ? "" : " · approximate placement")
+                      : "placement unreliable — this page's marks are listed in the margin instead"}
                   </span>
                 </figcaption>
               </figure>
@@ -1929,7 +2903,8 @@ function MarkedPaper({
         revealed={revealed}
         activeAnn={activeAnn}
         setActiveAnn={setActiveAnn}
-        isUnpinned={(idx) => !annBoxes[idx]}
+        isUnpinned={(idx) => !annBoxes[idx] || !annBoxes[idx].some((b) => pageTrusted(b.page))}
+        filterQuestionId={selectedQuestion ? selectedQuestion.questionId : null}
       />
     </div>
   );
@@ -2012,11 +2987,13 @@ function AnnotatedView({
                   <span style={{ color: s.color, fontWeight: 700 }}>
                     {s.icon} {s.label}
                   </span>
-                  {Number.isFinite(Number(seg.ann.marks)) && (
+                  {hasMarks(seg.ann) ? (
                     <span style={{ color: C.dim }}>
                       {" "}
                       · {seg.ann.marks} mark{Math.abs(Number(seg.ann.marks)) === 1 ? "" : "s"}
                     </span>
+                  ) : (
+                    <span style={{ color: C.faint }}> · marks not broken down</span>
                   )}
                   <span style={{ display: "block", marginTop: 5, color: C.text }}>{seg.ann.comment}</span>
                   {unsure && (
@@ -2047,7 +3024,10 @@ function AnnotatedView({
  * reads identically whether it was pinned to the handwriting or to the
  * transcript — and so an unpinnable one still has somewhere to live.
  */
-function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinned }) {
+function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinned, filterQuestionId = null }) {
+  const visible = filterQuestionId
+    ? annotations.filter((a) => a.questionId === filterQuestionId)
+    : annotations;
   return (
     <div className="qiq-margin">
       <div
@@ -2061,14 +3041,23 @@ function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinne
         }}
       >
         Teacher's margin notes
+        {filterQuestionId && (
+          <span style={{ color: C.faint, fontWeight: 500, textTransform: "none" }}>
+            {" "}
+            — this question only
+          </span>
+        )}
       </div>
 
-      {annotations.length === 0 && (
-        <div style={{ fontSize: 12.5, color: C.faint }}>No inline comments were returned.</div>
+      {visible.length === 0 && (
+        <div style={{ fontSize: 12.5, color: C.faint }}>
+          {filterQuestionId ? "No inline comments for this question." : "No inline comments were returned."}
+        </div>
       )}
 
       {annotations.map((ann, idx) => {
         if (idx >= revealed) return null; // slides in when its highlight lands
+        if (filterQuestionId && ann.questionId !== filterQuestionId) return null;
 
         const s = typeStyle(ann.type);
         const unpinned = isUnpinned(idx);
@@ -2129,7 +3118,7 @@ function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinne
   );
 }
 
-/* ------------------------------------------------------ Tab 2: report card -- */
+/* ------------------------------------------------- report card: score arc -- */
 
 function ScoreArc({ awarded, total, runKey }) {
   const shown = useCountUp(awarded, COUNT_MS, runKey);
@@ -2165,11 +3154,427 @@ function ScoreArc({ awarded, total, runKey }) {
   );
 }
 
+/* ---------------------------------------------------------- Tab: evaluate -- */
+
+/**
+ * The examiner's workbench. The AI has already read the paper; this screen is
+ * where the human decides. Every question gets a card with the proposed mark
+ * and — more importantly — the rationale for it, the points that earned or
+ * cost marks, and the student's answer as the machine read it. Anything the
+ * pipeline could not settle (a skipped answer, a failed marking, writing it
+ * could not place, low confidence) is called out rather than smoothed over.
+ *
+ * The final mark belongs to the examiner: editing a mark here updates the
+ * report card, the totals and the grade everywhere else in the app.
+ */
+function ReviewPanel({
+  evaluation,
+  keyPoints,
+  markOverrides,
+  onOverride,
+  awarded,
+  total,
+  grade,
+  hasPages,
+  geometryByPage = {},
+  onViewOnPage,
+  onRetryEval,
+  onShowRaw,
+}) {
+  const warnings =
+    evaluation.paper && Array.isArray(evaluation.paper.warnings) ? evaluation.paper.warnings : [];
+  const questions =
+    evaluation.paper && Array.isArray(evaluation.paper.questions) ? evaluation.paper.questions : [];
+  const hasUnassignedWriting = !!evaluation.hasUnassignedWriting;
+
+  /* One status vocabulary for the whole tab. "unanswered" is a claim about the
+     student and needs the strong case; anything weaker is a detection problem
+     the examiner must look at, not a zero. */
+  const statusOf = (k) => {
+    const s = answerStatus(k, { hasUnassignedWriting, lowConfidence: LOW_CONFIDENCE });
+    if (s === ANSWER_STATUS.FAILED) return { label: "Evaluation unavailable", color: C.red };
+    if (s === ANSWER_STATUS.NOT_DETECTED) return { label: "Answer not detected", color: C.amber };
+    if (s === ANSWER_STATUS.UNANSWERED) return { label: "Confirmed unanswered", color: C.faint };
+    if (s === ANSWER_STATUS.UNCERTAIN) return { label: "Uncertain — verify", color: C.amber };
+    if (k.marksTotal > 0 && k.marksAwarded >= k.marksTotal) return { label: "Full marks", color: C.green };
+    if (k.marksAwarded > 0) return { label: "Partial", color: C.amber };
+    return { label: "Zero", color: C.red };
+  };
+
+  /* Answer coverage, the workbench's opening fact: how much of the paper the
+     system could actually see before any mark was proposed. */
+  const statusKey = (k) => answerStatus(k, { hasUnassignedWriting, lowConfidence: LOW_CONFIDENCE });
+  const required = keyPoints.filter((k) => k.counted !== false);
+  const notCounted = keyPoints.filter((k) => k.counted === false);
+  const coverage = {
+    detected: keyPoints.filter((k) => statusKey(k) === ANSWER_STATUS.DETECTED).length,
+    uncertain: keyPoints.filter((k) => statusKey(k) === ANSWER_STATUS.UNCERTAIN).length,
+    notDetected: keyPoints.filter((k) => statusKey(k) === ANSWER_STATUS.NOT_DETECTED).length,
+    unanswered: keyPoints.filter((k) => statusKey(k) === ANSWER_STATUS.UNANSWERED).length,
+    failed: keyPoints.filter((k) => statusKey(k) === ANSWER_STATUS.FAILED).length,
+  };
+
+  /* A question the paper's choice excluded is not a problem to solve: the
+     student was never required to answer it, so it must not appear in the list
+     of things needing the examiner's attention. */
+  const attention = keyPoints
+    .map((k, i) => ({ k, i }))
+    .filter(({ k }) => k.counted !== false)
+    .filter(({ k }) => statusKey(k) !== ANSWER_STATUS.DETECTED && statusKey(k) !== ANSWER_STATUS.UNANSWERED);
+
+  const jump = (i) =>
+    document.getElementById(`qiq-rev-${i}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+
+  return (
+    <div className="qiq-rev">
+      {/* --------------------------------------------------- answer coverage */}
+      {keyPoints.length > 0 && (
+        <div className="qiq-rev-coverage">
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase", color: C.dim }}>
+            Answer coverage — {keyPoints.length} question{keyPoints.length === 1 ? "" : "s"}
+            {notCounted.length > 0 && (
+              <span style={{ color: C.blue, fontWeight: 600 }}>
+                {" "}· {required.length} counted, {notCounted.length} not required
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 12.5, color: C.text, lineHeight: 1.7, marginTop: 6 }}>
+            <span style={{ color: C.green }}>✓ {coverage.detected} detected</span>
+            {coverage.uncertain > 0 && <span style={{ color: C.amber }}> · ⚠ {coverage.uncertain} uncertain</span>}
+            {coverage.notDetected > 0 && (
+              <span style={{ color: C.amber }}> · ⚠ {coverage.notDetected} not confidently detected</span>
+            )}
+            {coverage.failed > 0 && <span style={{ color: C.red }}> · ⛔ {coverage.failed} evaluation failed</span>}
+            {coverage.unanswered > 0 && (
+              <span style={{ color: C.faint }}> · ○ {coverage.unanswered} confirmed unanswered</span>
+            )}
+          </div>
+          {coverage.notDetected > 0 && (
+            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
+              “Not detected” is a limitation of this system, not a fault of the student — inspect
+              before treating any of them as a zero.
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ----------------------------------------- what needs the examiner */}
+      {(warnings.length > 0 || attention.length > 0) && (
+        <div className="qiq-rev-alert">
+          <div style={{ fontWeight: 700, fontSize: 12.5, color: C.amber, marginBottom: 6 }}>
+            Check before finalising — {warnings.length + attention.length} item
+            {warnings.length + attention.length === 1 ? "" : "s"}
+          </div>
+          {warnings.map((w, i) => (
+            <div key={`w${i}`} className="qiq-rev-alertrow">
+              <span aria-hidden="true">⚠️</span>
+              <span>{w}</span>
+            </div>
+          ))}
+          {attention.map(({ k, i }) => (
+            <div key={`a${i}`} className="qiq-rev-alertrow">
+              <span aria-hidden="true">{statusKey(k) === ANSWER_STATUS.FAILED ? "⛔" : "⚠️"}</span>
+              <span>
+                <button className="qiq-rev-link" onClick={() => jump(i)}>
+                  {k.questionNumber ? `Q${k.questionNumber}` : `Point ${i + 1}`}
+                </button>{" "}
+                —{" "}
+                {statusKey(k) === ANSWER_STATUS.FAILED
+                  ? "the AI evaluator did not return a valid evaluation. Enter the mark yourself or retry."
+                  : statusKey(k) === ANSWER_STATUS.NOT_DETECTED
+                  ? "no answer could be confidently linked to this question. This does NOT prove it was unanswered — inspect the writing."
+                  : `the AI is unsure of its mark (confidence ${k.confidence}%).`}
+              </span>
+            </div>
+          ))}
+          <div style={{ marginTop: 8 }}>
+            <button className="qiq-rev-link" onClick={onShowRaw}>
+              Open the raw OCR text to verify what was read →
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* --------------------------------------------------- question index */}
+      {keyPoints.length > 1 && (
+        <div className="qiq-rev-index">
+          {keyPoints.map((k, i) => {
+            const s = statusOf(k);
+            return (
+              <button
+                key={i}
+                className="qiq-rev-chip"
+                style={{ borderColor: `${s.color}66`, color: s.color }}
+                title={`${k.questionNumber ? "Q" + k.questionNumber : "Point " + (i + 1)} — ${s.label}, ${
+                  k.marksAwarded ?? 0
+                }/${k.marksTotal ?? "—"}`}
+                onClick={() => jump(i)}
+              >
+                {k.questionNumber || i + 1}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ---------------------------------------------------- per-question */}
+      {keyPoints.map((k, i) => {
+        const s = statusOf(k);
+        const st = statusKey(k);
+        const q = questions[i] || {};
+        const overridden = Number.isFinite(markOverrides[i]);
+        const max = Number(k.marksTotal);
+        const editable = Number.isFinite(max) && max > 0;
+        const title = (k.point || "").replace(/^Q\S*\.\s*/, "");
+        const aiMark = Number(k.aiMarks !== undefined ? k.aiMarks : k.marksAwarded) || 0;
+
+        /* Where this answer physically lives, and how much to trust it. */
+        const pageRange =
+          Number.isFinite(k.pageStart) && k.pageStart > 0
+            ? k.pageEnd && k.pageEnd !== k.pageStart
+              ? `pages ${k.pageStart}–${k.pageEnd}`
+              : `page ${k.pageStart}`
+            : null;
+        const geomWorst = Number.isFinite(k.pageStart)
+          ? Array.from(
+              { length: (k.pageEnd || k.pageStart) - k.pageStart + 1 },
+              (_, j) => geometryByPage[k.pageStart + j] || "none"
+            ).reduce(
+              (worst, v) => ({ high: 3, medium: 2, low: 1, none: 0 })[v] < ({ high: 3, medium: 2, low: 1, none: 0 })[worst] ? v : worst,
+              "high"
+            )
+          : null;
+        const canShowOnPage = hasPages && k.questionId && pageRange && st !== ANSWER_STATUS.NOT_DETECTED && st !== ANSWER_STATUS.UNANSWERED;
+
+        return (
+          <div
+            key={i}
+            id={`qiq-rev-${i}`}
+            className={`qiq-rev-card${k.counted === false ? " is-uncounted" : ""}`}
+            style={{ borderLeftColor: k.counted === false ? C.faint : s.color }}
+          >
+            <div className="qiq-rev-head">
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <span className="qiq-rev-qnum" style={{ color: s.color }}>
+                  {k.questionNumber ? `Q${k.questionNumber}` : `Point ${i + 1}`}
+                </span>
+                <span className="qiq-rev-qtext" title={title}>
+                  {title || "—"}
+                </span>
+              </div>
+
+              <span
+                className="qiq-chip"
+                style={{ color: s.color, borderColor: `${s.color}55`, background: `${s.color}14` }}
+              >
+                {s.label}
+              </span>
+
+              {/* Marked, shown, and not counted. The student chose more answers
+                  than the paper asked for, or this one was not among their best
+                  — either way it is not a failure and must not read like one. */}
+              {k.counted === false && (
+                <span
+                  className="qiq-chip"
+                  style={{ color: C.blue, borderColor: `${C.blue}55`, background: `${C.blue}14` }}
+                  title="The paper's choice means this answer does not count towards the total. Raise its mark above a counted one and it will."
+                >
+                  Not counted
+                </span>
+              )}
+
+              <span className="qiq-rev-markbox">
+                {/* A failed evaluation is "no mark yet", never a zero. The box
+                    stays empty until the examiner enters one. */}
+                <input
+                  className="qiq-exam-marks"
+                  type="number"
+                  min="0"
+                  max={editable ? max : undefined}
+                  step="0.5"
+                  disabled={!editable}
+                  placeholder={st === ANSWER_STATUS.FAILED ? "—" : undefined}
+                  value={overridden ? markOverrides[i] : st === ANSWER_STATUS.FAILED ? "" : k.marksAwarded ?? 0}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (raw === "") {
+                      onOverride(i, null);
+                      return;
+                    }
+                    const v = Number(raw);
+                    if (!Number.isFinite(v)) return;
+                    const clamped = Math.max(0, Math.min(editable ? max : v, v));
+                    /* Typing the AI's own proposal back in is not a decision —
+                       store nothing, so a later re-grade is not pinned to it. */
+                    onOverride(i, st !== ANSWER_STATUS.FAILED && clamped === aiMark ? null : clamped);
+                  }}
+                  aria-label={`Final mark for ${k.questionNumber ? "question " + k.questionNumber : "point " + (i + 1)}`}
+                />
+                <span style={{ color: C.faint, fontSize: 12 }}>/ {k.marksTotal ?? "—"}</span>
+              </span>
+            </div>
+
+            {/* The three independent facts, separated: seeing the answer,
+                judging it, and pointing at it are different operations and
+                fail independently. */}
+            {k.questionId && (
+              <div className="qiq-rev-statusline">
+                {st === ANSWER_STATUS.DETECTED ? (
+                  <span style={{ color: C.green }}>✓ Answer detected{pageRange ? ` (${pageRange})` : ""}</span>
+                ) : st === ANSWER_STATUS.UNCERTAIN ? (
+                  <span style={{ color: C.amber }}>⚠ Answer detected with low confidence{pageRange ? ` (${pageRange})` : ""}</span>
+                ) : st === ANSWER_STATUS.NOT_DETECTED ? (
+                  <span style={{ color: C.amber }}>
+                    ⚠ Answer not confidently detected — this does NOT mean the question was unanswered
+                  </span>
+                ) : st === ANSWER_STATUS.UNANSWERED ? (
+                  <span style={{ color: C.faint }}>○ Confirmed unanswered — no matching or unassigned writing</span>
+                ) : null}
+                {st !== ANSWER_STATUS.FAILED && st !== ANSWER_STATUS.UNANSWERED && st !== ANSWER_STATUS.NOT_DETECTED && (
+                  <span style={{ color: C.green }}>
+                    ✓ Evaluated — {overridden ? markOverrides[i] : k.marksAwarded ?? 0}/{k.marksTotal}
+                  </span>
+                )}
+                {st === ANSWER_STATUS.FAILED && (
+                  <span style={{ color: C.red }}>⛔ Evaluation unavailable — no valid AI result</span>
+                )}
+                {st !== ANSWER_STATUS.UNANSWERED && st !== ANSWER_STATUS.NOT_DETECTED && geomWorst && geomWorst !== "high" && (
+                  <span style={{ color: geomWorst === "medium" ? C.amber : C.red }}>
+                    {geomWorst === "medium"
+                      ? "~ Annotation placement approximate"
+                      : "⚠ Handwriting position not mappable — marks are in the margin, not on the page"}
+                  </span>
+                )}
+              </div>
+            )}
+
+            {overridden && (
+              <div style={{ fontSize: 11, color: C.blue, marginTop: 4 }}>
+                ✎ Examiner set {markOverrides[i]} —{" "}
+                {st === ANSWER_STATUS.FAILED ? "the AI proposal was unavailable." : `the AI proposed ${aiMark}.`}
+                <button className="qiq-rev-link" style={{ marginLeft: 6 }} onClick={() => onOverride(i, null)}>
+                  {st === ANSWER_STATUS.FAILED ? "clear" : "revert to AI mark"}
+                </button>
+              </div>
+            )}
+
+            {/* Why the machine proposed this mark — the whole point of the tab. */}
+            {(k.rationale || q.rationale) && (
+              <p className="qiq-rev-rationale">
+                <span style={{ fontWeight: 700, color: C.dim }}>Why this mark: </span>
+                {k.rationale || q.rationale}
+              </p>
+            )}
+
+            {(k.correctPoints?.length || k.missingPoints?.length || k.incorrectPoints?.length) && (
+              <div className="qiq-rev-lists">
+                {k.correctPoints?.length > 0 && (
+                  <ul className="qiq-rev-list">
+                    {k.correctPoints.map((p, j) => (
+                      <li key={`c${j}`} style={{ color: C.green }}>
+                        ✓ <span style={{ color: C.text }}>{p}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {k.incorrectPoints?.length > 0 && (
+                  <ul className="qiq-rev-list">
+                    {k.incorrectPoints.map((p, j) => (
+                      <li key={`e${j}`} style={{ color: C.red }}>
+                        ✗ <span style={{ color: C.text }}>{p}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {k.missingPoints?.length > 0 && (
+                  <ul className="qiq-rev-list">
+                    {k.missingPoints.map((p, j) => (
+                      <li key={`m${j}`} style={{ color: "#A855F7" }}>
+                        ! <span style={{ color: C.text }}>{p}</span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {q.answerText && (
+              <details className="qiq-rev-answer">
+                <summary>Student's answer as read ({q.answerText.length} chars)</summary>
+                <p>{q.answerText}</p>
+              </details>
+            )}
+
+            <div className="qiq-rev-foot">
+              {k.grounding && <GroundingBadge grounding={k.grounding} />}
+              {Number.isFinite(k.confidence) && st !== ANSWER_STATUS.FAILED && (
+                <span style={{ fontSize: 10.5, color: isLowConfidence(k) ? C.amber : C.faint }}>
+                  AI confidence {k.confidence}%
+                </span>
+              )}
+              {st === ANSWER_STATUS.FAILED && (
+                <button className="qiq-rev-link" onClick={onRetryEval}>
+                  ↻ Retry evaluation
+                </button>
+              )}
+              {(st === ANSWER_STATUS.NOT_DETECTED || st === ANSWER_STATUS.UNCERTAIN) && (
+                <button className="qiq-rev-link" onClick={onShowRaw}>
+                  Inspect possible writing →
+                </button>
+              )}
+              {canShowOnPage ? (
+                <button className="qiq-rev-link" onClick={() => onViewOnPage(k)}>
+                  View answer on page →
+                </button>
+              ) : (
+                k.questionId &&
+                hasPages &&
+                st !== ANSWER_STATUS.FAILED && (
+                  <span style={{ fontSize: 10.5, color: C.faint }}>No page location available.</span>
+                )
+              )}
+            </div>
+          </div>
+        );
+      })}
+
+      {keyPoints.length === 0 && (
+        <p style={{ color: C.faint, fontSize: 12.5 }}>
+          No per-question breakdown was produced for this paper — see the Report Card tab.
+        </p>
+      )}
+
+      {/* --------------------------------------------------- examiner total */}
+      {keyPoints.length > 0 && (
+        <div className="qiq-rev-total">
+          <span style={{ color: C.dim, fontSize: 12.5 }}>Examiner's total</span>
+          <span style={{ fontWeight: 800, fontSize: 18, color: gradeColor(grade) }}>
+            {awarded} / {total}
+          </span>
+          <span style={{ fontSize: 12, color: C.faint }}>
+            grade {grade}
+            {notCounted.length > 0 &&
+              ` · out of the ${required.length} question${required.length === 1 ? "" : "s"} this paper required`}
+            {Object.keys(markOverrides).length > 0 &&
+              ` · ${Object.keys(markOverrides).length} mark(s) adjusted by you`}
+            {coverage.failed > 0 &&
+              ` · ${coverage.failed} question${coverage.failed === 1 ? "" : "s"} not yet evaluated (counted as 0 above until you set a mark)`}
+          </span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ----------------------------------------------------- Tab 4: report card -- */
+
 function ReportCard({
   evaluation,
   keyPoints,
   awarded,
   total,
+  grade,
+  overrideCount = 0,
   runKey,
   studentName,
   setStudentName,
@@ -2178,18 +3583,46 @@ function ReportCard({
   reportDate,
   setReportDate,
 }) {
-  const g = gradeColor(evaluation.grade);
+  const g = gradeColor(grade || evaluation.grade);
   const positives = Array.isArray(evaluation.thingsWellDone) ? evaluation.thingsWellDone : [];
   const improvements = Array.isArray(evaluation.improvementAreas) ? evaluation.improvementAreas : [];
-  const passed = total > 0 && awarded / total >= PASS_THRESHOLD;
-
   const remark = String(evaluation.overallRemark || "");
   const typed = useTypewriter(remark, TYPE_MS, runKey);
   const speech = useSpeech();
 
-  const qualityChip = (q, covered) => {
-    if (q === "well" || (covered && !q)) return { label: "Covered well", color: C.green };
-    if (q === "partially") return { label: "Partial", color: C.amber };
+  /* The printed report speaks the same status vocabulary as the Evaluate tab.
+     It must never print "not covered" where the workbench said "we could not
+     read it" — the report is the copy that reaches the student. */
+  const hasUnassignedWriting = !!evaluation.hasUnassignedWriting;
+  const rows = keyPoints.map((k) => {
+    const st = answerStatus(k, { hasUnassignedWriting, lowConfidence: LOW_CONFIDENCE });
+    /* A failed evaluation is "no mark yet", not a zero. Only an
+       examiner-entered mark turns the dash into a number. */
+    return { k, st, unevaluated: st === ANSWER_STATUS.FAILED && !k.overridden, counted: k.counted !== false };
+  });
+  const notCounted = rows.filter((r) => !r.counted);
+
+  const unevaluated = rows.filter((r) => r.unevaluated && r.counted);
+  const pending = unevaluated.reduce((sum, r) => sum + (Number(r.k.marksTotal) || 0), 0);
+
+  /* PASS/FAIL is a verdict, and a verdict cannot be issued while marks are
+     still missing. If the pending marks alone could carry the paper over the
+     line, the honest stamp is "pending" — a FAIL there would be the report
+     card asserting something nobody has actually marked. */
+  const passed = total > 0 && awarded / total >= PASS_THRESHOLD;
+  const undecided = !passed && total > 0 && pending > 0 && (awarded + pending) / total >= PASS_THRESHOLD;
+  const verdict = passed ? "pass" : undecided ? "pending" : "fail";
+
+  const chipFor = ({ k, st, unevaluated: pendingRow, counted }) => {
+    /* Marked, printed, and not part of the score. The paper let the student
+       choose, and this answer was not among the ones that count. */
+    if (!counted) return { label: "Not counted", color: C.blue };
+    if (pendingRow) return { label: "Eval. unavailable", color: C.red };
+    if (st === ANSWER_STATUS.NOT_DETECTED) return { label: "Answer not detected", color: C.amber };
+    if (st === ANSWER_STATUS.UNANSWERED) return { label: "Unanswered", color: C.faint };
+    if (st === ANSWER_STATUS.UNCERTAIN) return { label: "Verify", color: C.amber };
+    if (k.quality === "well" || (k.covered && !k.quality)) return { label: "Covered well", color: C.green };
+    if (k.quality === "partially") return { label: "Partial", color: C.amber };
     return { label: "Not covered", color: C.red };
   };
 
@@ -2256,17 +3689,21 @@ function ReportCard({
 
           <div className="qiq-grade-block">
             <div className="qiq-grade-stamp" key={`g${runKey}`} style={{ borderColor: g, color: g }}>
-              {evaluation.grade || "—"}
+              {grade || evaluation.grade || "—"}
             </div>
             <div className="qiq-grade-caption">Grade awarded</div>
           </div>
 
           <div
-            className={`qiq-passmark ${passed ? "is-pass" : "is-fail"}`}
+            className={`qiq-passmark is-${verdict}`}
             key={`p${runKey}`}
-            title={`Pass mark is ${Math.round(PASS_THRESHOLD * 100)}%`}
+            title={
+              verdict === "pending"
+                ? `Pass mark is ${Math.round(PASS_THRESHOLD * 100)}%. ${pending} mark(s) are still unevaluated — enough to change this verdict.`
+                : `Pass mark is ${Math.round(PASS_THRESHOLD * 100)}%`
+            }
           >
-            {passed ? "PASS" : "FAIL"}
+            {verdict === "pending" ? "PENDING" : verdict === "pass" ? "PASS" : "FAIL"}
           </div>
         </div>
 
@@ -2284,8 +3721,9 @@ function ReportCard({
                 </tr>
               </thead>
               <tbody>
-                {keyPoints.map((k, i) => {
-                  const chip = qualityChip(k.quality, k.covered);
+                {rows.map((row, i) => {
+                  const { k, unevaluated } = row;
+                  const chip = chipFor(row);
                   return (
                     <tr key={i}>
                       <td style={{ fontWeight: 600 }}>{k.point}</td>
@@ -2298,8 +3736,23 @@ function ReportCard({
                         </span>
                       </td>
                       <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-                        <strong style={{ color: chip.color }}>{k.marksAwarded ?? 0}</strong>
+                        <strong style={{ color: chip.color, opacity: row.counted ? 1 : 0.6 }}>
+                          {unevaluated ? "—" : k.marksAwarded ?? 0}
+                        </strong>
                         <span style={{ color: C.faint }}> / {k.marksTotal ?? "—"}</span>
+                        {!row.counted && (
+                          <div style={{ fontSize: 9.5, color: C.blue, whiteSpace: "nowrap" }}>
+                            not in the total
+                          </div>
+                        )}
+                        {k.overridden && (
+                          <div
+                            style={{ fontSize: 9.5, color: C.blue, whiteSpace: "nowrap" }}
+                            title={`The AI proposed ${k.aiMarks ?? 0}; the examiner set ${k.marksAwarded}.`}
+                          >
+                            ✎ examiner-set
+                          </div>
+                        )}
                       </td>
                       <td style={{ color: C.dim, lineHeight: 1.55 }}>
                         {k.teacherNote}
@@ -2335,6 +3788,12 @@ function ReportCard({
                 <tr>
                   <td colSpan={2} style={{ fontWeight: 700 }}>
                     Total
+                    {pending > 0 && (
+                      <div style={{ fontSize: 10, fontWeight: 500, color: C.red }}>
+                        {pending} mark{pending === 1 ? "" : "s"} across {unevaluated.length} question
+                        {unevaluated.length === 1 ? "" : "s"} are still unevaluated and count as 0 here
+                      </div>
+                    )}
                   </td>
                   <td style={{ textAlign: "right", fontWeight: 800, color: g, fontVariantNumeric: "tabular-nums" }}>
                     {awarded} / {total}
@@ -2437,6 +3896,15 @@ function ReportCard({
         <div className="qiq-report-foot">
           Generated by QIQ using {EVAL_MODEL} · Marks flagged ⚠️ were low-confidence and should be
           verified by the teacher before this report is issued.
+          {notCounted.length > 0 &&
+            ` · This paper let the student choose: ${rows.length - notCounted.length} of ${rows.length} ` +
+              `question(s) count, and the total is out of those. The rest are marked for the record.`}
+          {unevaluated.length > 0 &&
+            ` · ${unevaluated.length} question(s) could not be evaluated automatically — the ${pending} mark(s) they carry are pending, not zero.`}
+          {verdict === "pending" &&
+            " · The pass/fail verdict is withheld until those marks are entered: the paper can still pass."}
+          {overrideCount > 0 &&
+            ` · ${overrideCount} mark${overrideCount === 1 ? "" : "s"} on this report were set by the examiner, overriding the AI proposal.`}
         </div>
       </div>
     </div>
@@ -2445,10 +3913,17 @@ function ReportCard({
 
 /* -------------------------------------------------------------- Tab 3: raw -- */
 
-function RawView({ text, setText, dirty, onReEvaluate, rawResponse, reasoning }) {
+function RawView({ pageTexts, setPageTexts, geometryByPage = {}, dirty, onReEvaluate, rawResponse, reasoning }) {
   const [panel, setPanel] = useState("");
+  const text = pageTexts.join("\n\n");
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
   const toggle = (id) => setPanel((p) => (p === id ? "" : id));
+
+  /* One box per page, not one box for the paper. The page a line sits on is what
+     its ink measurement is attached to, and a single merged box gave the user no
+     way to correct a word without putting those boundaries at risk. */
+  const editPage = (i, value) =>
+    setPageTexts(pageTexts.map((t, j) => (j === i ? value : t)));
 
   return (
     <div style={{ display: "grid", gap: 12 }}>
@@ -2456,7 +3931,9 @@ function RawView({ text, setText, dirty, onReEvaluate, rawResponse, reasoning })
         <div>
           <div style={{ fontSize: 13, fontWeight: 700 }}>Extracted text</div>
           <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
-            {words} words · {text.length} characters · fix any misread handwriting and re-grade
+            {words} words · {text.length} characters
+            {pageTexts.length > 1 ? ` · ${pageTexts.length} pages, edited separately` : ""} · fix any
+            misread handwriting and re-grade
           </div>
         </div>
         {dirty && (
@@ -2466,7 +3943,38 @@ function RawView({ text, setText, dirty, onReEvaluate, rawResponse, reasoning })
         )}
       </div>
 
-      <textarea className="qiq-mono" value={text} onChange={(e) => setText(e.target.value)} spellCheck={false} />
+      {pageTexts.length <= 1 ? (
+        <textarea
+          className="qiq-mono"
+          value={pageTexts[0] || ""}
+          onChange={(e) => editPage(0, e.target.value)}
+          spellCheck={false}
+        />
+      ) : (
+        pageTexts.map((pageText, i) => {
+          const level = geometryByPage[i + 1] || "none";
+          return (
+            <div key={i} className="qiq-rawpage">
+              <div className="qiq-rawpage-head">
+                <span>Page {i + 1}</span>
+                <span style={{ color: C.faint }}>
+                  {pageText.trim() ? pageText.trim().split(/\s+/).length : 0} words ·{" "}
+                  {level === "high" || level === "medium"
+                    ? "marks can be placed on this page"
+                    : "this page's writing could not be measured"}
+                </span>
+              </div>
+              <textarea
+                className="qiq-mono"
+                style={{ minHeight: 160 }}
+                value={pageText}
+                onChange={(e) => editPage(i, e.target.value)}
+                spellCheck={false}
+              />
+            </div>
+          );
+        })
+      )}
 
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
         <button className="qiq-link" onClick={() => toggle("raw")}>
@@ -2532,8 +4040,10 @@ const CSS = `
 .qiq-panel {
   background: ${C.card}; border:1px solid ${C.border}; border-radius:16px; padding:18px;
   box-shadow: 0 12px 40px rgba(0,0,0,.28);
+  min-width: 0; /* a grid child must be allowed to shrink, or wide content escapes */
+  overflow: hidden;
 }
-.qiq-right { min-height: 560px; display:flex; flex-direction:column; }
+.qiq-right { min-height: 560px; display:flex; flex-direction:column; overflow:visible; }
 
 .qiq-step-num {
   width:20px; height:20px; border-radius:6px; display:grid; place-items:center;
@@ -2564,6 +4074,7 @@ const CSS = `
   display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;
   border:1.5px dashed ${C.borderSoft}; border-radius:14px; padding:26px 16px; cursor:pointer;
   background: linear-gradient(180deg, rgba(37,99,235,.04), transparent); transition:.2s;
+  overflow:hidden; max-width:100%;
 }
 .qiq-drop:hover, .qiq-drop.is-dragging {
   border-color:${C.blue}; background: rgba(37,99,235,.09); transform: translateY(-1px);
@@ -2576,10 +4087,11 @@ const CSS = `
 .qiq-file {
   display:flex; align-items:center; gap:10px; background:#0B1220;
   border:1px solid ${C.border}; border-radius:10px; padding:8px 10px;
+  min-width:0; max-width:100%; overflow:hidden;
 }
 .qiq-thumb {
-  width:34px; height:44px; object-fit:cover; border-radius:6px;
-  border:1px solid ${C.border}; flex-shrink:0; background:#fff;
+  width:34px; height:44px; object-fit:contain; border-radius:6px;
+  border:1px solid ${C.border}; flex-shrink:0; background:#fff; max-width:100%;
 }
 .qiq-ellipsis { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .qiq-x {
@@ -2631,21 +4143,25 @@ const CSS = `
   border:1px solid ${C.border}; margin-bottom:18px;
 }
 .qiq-orb {
-  width:56px; height:56px; border-radius:50%;
+  width:38px; height:38px; border-radius:50%; flex-shrink:0;
   background: conic-gradient(from 0deg, ${C.blue}, ${C.purple}, ${C.blue});
-  mask: radial-gradient(circle 20px at center, transparent 98%, #000 100%);
-  -webkit-mask: radial-gradient(circle 20px at center, transparent 98%, #000 100%);
+  mask: radial-gradient(circle 13px at center, transparent 98%, #000 100%);
+  -webkit-mask: radial-gradient(circle 13px at center, transparent 98%, #000 100%);
   animation: qiq-spin 1.1s linear infinite;
 }
-.qiq-proc {
-  display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:11px;
-  background:#0B1220; border:1px solid ${C.border}; transition:.25s;
+.qiq-rawpage { display:grid; gap:6px; }
+.qiq-rawpage-head {
+  display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
+  font-size:11px; font-weight:700; color:${C.dim}; letter-spacing:.4px;
 }
-.qiq-proc.is-active { border-color: rgba(37,99,235,.5); background: rgba(37,99,235,.08); }
-.qiq-proc-dot {
-  width:26px; height:26px; border-radius:50%; display:grid; place-items:center; flex-shrink:0;
-  background:#111C33; border:1px solid ${C.border}; font-size:11px; font-weight:700; color:${C.dim};
+
+.qiq-cut {
+  margin-top:10px; display:grid; gap:6px; background: rgba(245,158,11,.09);
+  border:1px solid rgba(245,158,11,.3); border-radius:10px; padding:9px 11px;
+  font-size:11.5px; line-height:1.6; color:#FCD34D;
 }
+.qiq-cut strong { color:#FDE68A; }
+
 .qiq-notice {
   margin-top:16px; max-width:440px; background: rgba(245,158,11,.1);
   border:1px solid rgba(245,158,11,.32); color:#FCD34D; border-radius:10px;
@@ -2730,6 +4246,13 @@ const CSS = `
 .qiq-drop-sm { padding:14px 16px; min-height:0; text-align:center; }
 
 .qiq-exam { border:1px solid ${C.border}; border-radius:12px; background:#0B1220; padding:12px 13px; }
+.qiq-choice {
+  display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:10px;
+  padding:8px 10px; border-radius:9px; font-size:11.5px; color:${C.text};
+  background: rgba(37,99,235,.08); border:1px solid rgba(37,99,235,.28);
+}
+.qiq-choice .qiq-exam-marks { width:52px; }
+.qiq-choice-src { margin-left:auto; color:${C.faint}; font-size:10px; }
 .qiq-exam-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
 .qiq-exam-total { text-align:right; flex-shrink:0; line-height:1.2; }
 .qiq-exam-rows { display:grid; gap:4px; margin-top:11px; max-height:230px; overflow:auto; }
@@ -2751,6 +4274,120 @@ const CSS = `
   display:flex; gap:7px; align-items:flex-start; font-size:11.5px; line-height:1.55;
   color:${C.text}; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.28);
   border-radius:8px; padding:7px 9px;
+}
+
+/* ---- evaluate tab: the examiner's workbench ---- */
+.qiq-rev { display:grid; gap:12px; }
+.qiq-rev-alert {
+  border:1px solid rgba(245,158,11,.35); background:rgba(245,158,11,.07);
+  border-radius:12px; padding:12px 14px;
+}
+.qiq-rev-alertrow {
+  display:flex; gap:8px; align-items:flex-start; font-size:12px; line-height:1.6;
+  color:${C.text}; margin-top:5px;
+}
+.qiq-rev-link {
+  background:none; border:none; padding:0; color:${C.blue}; font-size:inherit; font-family:inherit;
+  cursor:pointer; text-decoration:underline; text-underline-offset:2px;
+}
+.qiq-rev-index { display:flex; flex-wrap:wrap; gap:6px; }
+.qiq-rev-chip {
+  min-width:34px; padding:4px 8px; border-radius:8px; border:1px solid ${C.borderSoft};
+  background:#0B1220; font-size:11.5px; font-weight:700; font-family:inherit; cursor:pointer;
+}
+.qiq-rev-chip:hover { filter:brightness(1.4); }
+.qiq-rev-card {
+  border:1px solid ${C.border}; border-left:3px solid ${C.borderSoft}; border-radius:12px;
+  background:${C.card}; padding:13px 15px; scroll-margin-top:12px;
+}
+.qiq-rev-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.qiq-rev-qnum { font-weight:800; font-size:13px; margin-right:7px; }
+.qiq-rev-qtext {
+  color:${C.dim}; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  max-width:100%; display:inline-block; vertical-align:bottom;
+}
+.qiq-rev-markbox { display:flex; align-items:center; gap:5px; margin-left:auto; }
+.qiq-rev-markbox .qiq-exam-marks { width:56px; font-size:13px; padding:4px 6px; }
+.qiq-rev-rationale { font-size:12.5px; line-height:1.65; color:${C.text}; margin:10px 0 0; }
+.qiq-rev-lists { display:grid; gap:4px; margin-top:9px; }
+.qiq-rev-list { list-style:none; margin:0; padding:0; display:grid; gap:3px; font-size:12px; line-height:1.55; }
+.qiq-rev-answer { margin-top:10px; font-size:11.5px; color:${C.faint}; }
+.qiq-rev-answer summary { cursor:pointer; color:${C.dim}; }
+.qiq-rev-answer p {
+  margin:7px 0 0; padding:9px 11px; border-radius:8px; background:#0A0F1E;
+  color:${C.dim}; line-height:1.65; white-space:pre-wrap; max-height:220px; overflow:auto;
+}
+.qiq-rev-foot { display:flex; align-items:center; gap:10px; margin-top:11px; flex-wrap:wrap; }
+.qiq-rev-foot .qiq-rev-link { margin-left:auto; font-size:11.5px; }
+.qiq-rev-total {
+  display:flex; align-items:baseline; gap:12px; justify-content:flex-end;
+  border-top:1px solid ${C.border}; padding-top:11px;
+}
+.qiq-rev-card.is-uncounted { opacity:.72; }
+
+.qiq-rev-coverage {
+  border:1px solid ${C.border}; border-radius:12px; background:#0B1220; padding:11px 14px;
+}
+.qiq-rev-statusline {
+  display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:8px;
+  font-size:11.5px; line-height:1.5;
+}
+/* ---- the run screen: a pipeline reporting on itself, not a loading bar ---- */
+.qiq-run {
+  display:grid; gap:14px; padding:22px 20px; border:1px solid ${C.border};
+  border-radius:14px; background:${C.card}; width:100%;
+}
+.qiq-run-head { display:flex; align-items:center; gap:14px; }
+.qiq-run-title { font-size:15px; font-weight:700; color:${C.text}; display:flex; align-items:baseline; gap:2px; }
+.qiq-run-sub { font-size:11.5px; color:${C.faint}; margin-top:3px; line-height:1.5; }
+.qiq-run-clock {
+  margin-left:auto; font-size:13px; font-weight:700; color:${C.dim};
+  font-variant-numeric: tabular-nums; letter-spacing:.5px;
+}
+.qiq-run-ell::after { content:"…"; animation: qiq-ell 1.4s steps(4,end) infinite; }
+@keyframes qiq-ell { 0% { opacity:.2; } 50% { opacity:1; } 100% { opacity:.2; } }
+
+.qiq-rail { display:flex; gap:6px; }
+.qiq-rail-seg { flex:1; min-width:0; }
+.qiq-rail-bar {
+  display:block; height:3px; border-radius:2px; background:${C.border}; transition: background .3s;
+}
+.qiq-rail-seg.is-done .qiq-rail-bar { background:${C.green}; }
+.qiq-rail-seg.is-now .qiq-rail-bar {
+  background: linear-gradient(90deg, ${C.blue}, ${C.purple}, ${C.blue});
+  background-size:200% 100%; animation: qiq-rail-run 1.6s linear infinite;
+}
+@keyframes qiq-rail-run { from { background-position:0 0; } to { background-position:200% 0; } }
+.qiq-rail-label {
+  display:block; margin-top:6px; font-size:9.5px; letter-spacing:.4px; text-transform:uppercase;
+  color:${C.faint}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
+.qiq-rail-seg.is-now .qiq-rail-label { color:${C.text}; }
+
+.qiq-trace {
+  max-height:min(46vh, 340px); overflow:auto; border:1px solid ${C.border}; border-radius:10px;
+  background:${C.navy}; padding:9px 4px 9px 10px; display:grid; gap:2px; align-content:start;
+}
+.qiq-trace-idle { font-size:11.5px; color:${C.faint}; padding:4px 2px; }
+.qiq-trace-row {
+  display:grid; grid-template-columns: 40px 14px minmax(0, auto) 1fr; gap:8px; align-items:baseline;
+  font-size:11.5px; line-height:1.7; padding:1px 0;
+  animation: qiq-trace-in .22s ease-out both;
+}
+@keyframes qiq-trace-in { from { opacity:0; transform: translateY(3px); } to { opacity:1; transform:none; } }
+.qiq-trace-time { color:${C.faint}; font-variant-numeric: tabular-nums; font-size:10.5px; }
+.qiq-trace-mark { font-weight:800; color:${C.dim}; }
+.qiq-trace-row.is-ok .qiq-trace-mark { color:${C.green}; }
+.qiq-trace-row.is-warn .qiq-trace-mark { color:${C.amber}; }
+.qiq-trace-row.is-start .qiq-trace-mark { color:${C.blue}; }
+.qiq-trace-text { color:${C.text}; font-weight:600; }
+.qiq-trace-detail { color:${C.faint}; min-width:0; overflow-wrap:anywhere; }
+.qiq-trace-row.is-live .qiq-trace-text { color:${C.dim}; font-weight:500; }
+.qiq-trace-row.is-live { opacity:.9; }
+
+.qiq-proc-coverage {
+  margin-top:20px; font-size:12.5px; color:${C.text};
+  border:1px solid ${C.borderSoft}; border-radius:10px; padding:9px 14px; background:#0B1220;
 }
 
 .qiq-reflist { display:grid; gap:5px; margin-top:8px; }
@@ -2779,6 +4416,46 @@ const CSS = `
   border:1px solid ${C.border}; background:#0B1220; overflow:hidden;
 }
 .qiq-page-img { display:block; width:100%; height:auto; }
+
+/* the selected question's answer, outlined where it actually sits */
+.qiq-ans-region {
+  position:absolute; border:2px dashed ${C.blue}; border-radius:8px;
+  background: rgba(96,165,250,.07); pointer-events:none; line-height:normal;
+  box-shadow: 0 0 0 9999px rgba(2,6,23,.42);
+  animation: qiq-region-in .35s ease-out both;
+}
+.qiq-ans-region-tag {
+  position:absolute; top:-10px; left:8px; padding:1px 7px; border-radius:6px;
+  background:${C.blue}; color:#F8FAFC; font-size:10px; font-weight:800; letter-spacing:.4px;
+}
+.qiq-ans-region.is-approx { border-style:dotted; border-color:${C.amber}; background: rgba(245,158,11,.06); }
+.qiq-ans-region.is-approx .qiq-ans-region-tag { background:${C.amber}; color:#1A1206; }
+@keyframes qiq-region-in { from { opacity:0; } to { opacity:1; } }
+
+.qiq-qcard-answer { margin-top:8px; font-size:12px; }
+.qiq-qcard-answer summary { cursor:pointer; color:${C.dim}; font-size:11.5px; }
+.qiq-qcard-answer p {
+  margin:6px 0 0; padding:8px 10px; border-radius:8px; background:${C.navy};
+  border:1px solid ${C.border}; color:${C.text}; line-height:1.65; white-space:pre-wrap;
+  max-height:150px; overflow:auto;
+}
+.qiq-qcard-points { list-style:none; margin:9px 0 0; padding:0; display:grid; gap:4px; font-size:11.5px; }
+.qiq-qcard-points li { display:flex; gap:7px; line-height:1.55; }
+
+/* the question behind the highlights, above the pages */
+.qiq-qcard {
+  border:1px solid ${C.border}; border-left:3px solid ${C.blue}; border-radius:10px;
+  background:${C.card}; padding:11px 13px; margin-bottom:12px;
+}
+.qiq-qcard-head { display:flex; gap:10px; align-items:flex-start; }
+.qiq-qcard-num { font-size:12px; font-weight:800; color:${C.blue}; flex-shrink:0; padding-top:1px; }
+.qiq-qcard-text { flex:1; min-width:0; font-size:12.5px; color:${C.text}; line-height:1.55; }
+.qiq-qcard-marks {
+  flex-shrink:0; text-align:right; font-size:15px; font-weight:800; color:${C.text};
+  font-variant-numeric: tabular-nums;
+}
+.qiq-qcard-where { font-size:11.5px; margin-top:7px; line-height:1.6; }
+.qiq-qcard-why { font-size:12px; color:${C.dim}; line-height:1.6; margin:7px 0 0; }
 .qiq-page-cap {
   display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;
   font-size:11px; color:${C.dim}; padding:7px 3px 0; line-height:1.5;
@@ -2953,6 +4630,11 @@ const CSS = `
 }
 .qiq-passmark.is-pass { color:${C.green}; background: rgba(34,197,94,.07); }
 .qiq-passmark.is-fail { color:${C.red}; background: rgba(239,68,68,.07); }
+/* the third state: marks are missing, so no verdict has been earned yet */
+.qiq-passmark.is-pending {
+  color:${C.amber}; background: rgba(245,158,11,.07);
+  font-size:15px; letter-spacing:1.5px;
+}
 @keyframes qiq-stamp-in {
   0%   { transform: scale(0) rotate(-24deg); opacity:0; }
   60%  { transform: scale(1.1) rotate(1deg); opacity:1; }
