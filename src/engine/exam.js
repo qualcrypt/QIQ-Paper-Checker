@@ -14,6 +14,7 @@
  */
 
 import { detectQuestionsStructural, extractMarks } from "./segment.js";
+import { detectChoice, describeChoice } from "./choice.js";
 import { normalizeText } from "./text.js";
 
 /**
@@ -169,7 +170,7 @@ export function structuralMarks(lines) {
  * @returns {{questions: object[], totalMarks: number, declaredTotal: number|null,
  *            warnings: string[], blocking: boolean}}
  */
-export function validateExam(raw, { structural = new Map() } = {}) {
+export function validateExam(raw, { structural = new Map(), lines = null } = {}) {
   const warnings = [];
 
   const questions = (raw.questions || [])
@@ -220,15 +221,28 @@ export function validateExam(raw, { structural = new Map() } = {}) {
   const declaredTotal =
     Number.isFinite(raw.totalMarks) && raw.totalMarks > 0 ? raw.totalMarks : null;
 
+  /* A paper that prints more questions than it asks for is not worth the sum of
+     its questions. The rubric says so on the page — "answer any 3 of the
+     following 5" — and it is read off the page rather than configured, so any
+     wording and any counts work without being told about them. */
+  const choice = lines ? detectChoice(lines) : [];
+  if (choice.length) {
+    warnings.push(
+      `This paper offers a choice: ${describeChoice(choice)}. The total is out of the ` +
+        `questions the student had to attempt, not out of every question printed.`
+    );
+  }
+
   return {
     title: String(raw.title || "").trim(),
     subject: String(raw.subject || "").trim(),
     declaredTotal,
+    choice,
     /* Warnings about how the paper was *read* — these are facts about the
        extraction and never change afterwards. Anything about the marks
        themselves is derived below, because the operator can edit those. */
     baseWarnings: warnings,
-    ...deriveMarks(questions, declaredTotal, warnings),
+    ...deriveMarks(questions, declaredTotal, warnings, choice),
   };
 }
 
@@ -242,7 +256,7 @@ export function validateExam(raw, { structural = new Map() } = {}) {
  *
  * @returns {{questions: object[], totalMarks: number, warnings: string[], blocking: boolean}}
  */
-export function deriveMarks(questions, declaredTotal, baseWarnings = []) {
+export function deriveMarks(questions, declaredTotal, baseWarnings = [], choice = []) {
   const warnings = baseWarnings.slice();
   const missing = questions.filter((q) => q.maxMarks === null);
 
@@ -254,18 +268,35 @@ export function deriveMarks(questions, declaredTotal, baseWarnings = []) {
     );
   }
 
-  const sum = questions.reduce((s, q) => s + (q.maxMarks || 0), 0);
+  /* The paper's maximum, which is not the sum of its questions when it offers a
+     choice: only the best N of each group can ever be counted, so only those N
+     belong in the denominator. This is why a paper whose questions summed to 56
+     against a printed total of 40 used to report a mismatch that was never a
+     mistake — the paper meant 40 all along. */
+  const dropped = new Set();
+  for (const group of choice || []) {
+    const members = group.numbers
+      .map((n) => questions.find((q) => q.number === n))
+      .filter(Boolean)
+      .sort((a, b) => (b.maxMarks || 0) - (a.maxMarks || 0));
+    for (const q of members.slice(group.required)) dropped.add(q.id);
+  }
+
+  const sum = questions.reduce((s, q) => s + (dropped.has(q.id) ? 0 : q.maxMarks || 0), 0);
+  const printedSum = questions.reduce((s, q) => s + (q.maxMarks || 0), 0);
 
   if (declaredTotal !== null && missing.length === 0 && sum !== declaredTotal) {
     warnings.push(
-      `The questions add up to ${sum} marks, but the paper states a total of ${declaredTotal}. ` +
-        `Please check the question paper.`
+      `The paper is worth ${sum} marks` +
+        (dropped.size ? ` once the choice is applied (${printedSum} printed in total)` : "") +
+        `, but it states a total of ${declaredTotal}. Please check the question paper.`
     );
   }
 
   return {
     questions,
     totalMarks: sum,
+    printedMarks: printedSum,
     warnings,
     // Grading cannot start while a question has no ceiling to clamp against.
     blocking: missing.length > 0,
