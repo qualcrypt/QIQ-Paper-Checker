@@ -10,18 +10,7 @@
 import { linesToText } from "./ocr.js";
 import { validate } from "./json.js";
 import { normalizeText } from "./text.js";
-
-/**
- * Ordered by specificity. Anchored to line start because a "1." mid-sentence is
- * not a question number.
- */
-const PATTERNS = [
-  { re: /^\s*(?:Q(?:uestion)?\s*[.\-:]?\s*)(\d+)\s*[.):\-]?\s*/i, kind: "main" },
-  { re: /^\s*(\d{1,2})\s*[.)]\s+/, kind: "main" },
-  { re: /^\s*\(\s*([a-z])\s*\)\s*/i, kind: "sub" },
-  { re: /^\s*\(\s*((?:i|ii|iii|iv|v|vi|vii|viii|ix|x)+)\s*\)\s*/i, kind: "roman" },
-  { re: /^\s*([a-z])\s*[.)]\s+/i, kind: "sub" },
-];
+import { readLabel, labelParts, canonicalLabel } from "./identity.js";
 
 /** "(5 marks)", "[5]", "- 5 marks", "5 M" */
 const MARKS_RE = /[\[(]\s*(\d{1,3})\s*(?:marks?|m)?\s*[\])]|\b(\d{1,3})\s*marks?\b/i;
@@ -29,29 +18,42 @@ const MARKS_RE = /[\[(]\s*(\d{1,3})\s*(?:marks?|m)?\s*[\])]|\b(\d{1,3})\s*marks?
 /**
  * Structural pass over the lines.
  * @param {import("./types.js").OCRLine[]} lines
+ * @param {{known?: Set<string>}} [opts]  label keys the paper is known to have,
+ *   which lets an otherwise ambiguous head ("1.1") be recognised — see
+ *   readLabel() in identity.js
  * @returns {{questions: import("./types.js").ParsedQuestion[], ambiguous: boolean, reason: string}}
  */
-export function detectQuestionsStructural(lines) {
+export function detectQuestionsStructural(lines, opts = {}) {
   const heads = [];
 
   for (const line of lines) {
-    for (const { re, kind } of PATTERNS) {
-      const m = re.exec(line.text);
-      if (!m) continue;
+    /* What a written label looks like is identity.js's business, not this
+       module's. Segmentation only cares where one starts and what level it
+       names — so a paper that writes "Ans 1.", "Q. No. 7" or "2 a)" is
+       segmented the same as one that writes "1.". */
+    const hit = readLabel(line.text, opts);
+    if (!hit) continue;
 
-      const label = (m[1] || "").trim();
-      // A roman numeral like "i" also matches the single-letter rule; the more
-      // specific pattern wins because PATTERNS is ordered.
-      heads.push({
-        lineId: line.id,
-        index: line.index,
-        page: line.page,
-        kind: kind === "roman" ? "sub" : kind,
-        label,
-        rest: line.text.slice(m[0].length).trim(),
-      });
-      break;
-    }
+    const parts = labelParts(hit.label);
+    if (parts.length === 0) continue;
+
+    const numericHead = /^\d+$/.test(parts[0]);
+    const kind = parts.length > 1 ? "combined" : numericHead ? "main" : "sub";
+
+    heads.push({
+      lineId: line.id,
+      index: line.index,
+      page: line.page,
+      kind,
+      label: canonicalLabel(hit.label),
+      /* The label as it was actually written, so it can be stripped off the
+         front of the answer text it introduces. */
+      raw: hit.label,
+      /* What a later bare "(c)" belongs to: the number this head opened with,
+         if it opened with one at all. */
+      main: numericHead ? parts[0] : null,
+      rest: hit.rest,
+    });
   }
 
   if (heads.length === 0) {
@@ -61,6 +63,7 @@ export function detectQuestionsStructural(lines) {
   const byIndex = new Map(lines.map((l) => [l.index, l]));
   const questions = [];
   let lastMain = null;
+  let lastMainNumber = null;
 
   heads.forEach((head, i) => {
     const next = heads[i + 1];
@@ -80,10 +83,12 @@ export function detectQuestionsStructural(lines) {
     const questionText = looksLikeQuestion(head.rest) ? stripMarks(head.rest) : "";
     const answerIds = questionText ? bodyIds.slice(1) : bodyIds;
     const answerTextRaw = linesToText(lines, answerIds);
-    const answerText = questionText ? answerTextRaw : stripLeadingLabel(answerTextRaw, head.label);
+    const answerText = questionText ? answerTextRaw : stripLeadingLabel(answerTextRaw, head.raw || head.label);
 
-    const isSub = head.kind === "sub" && lastMain;
-    const number = isSub ? `${lastMain.questionNumber}(${head.label})` : head.label;
+    /* A bare "(c)" belongs to the number the last head carried, not to the last
+       head's own label: after "3(a)" the parent is 3, not 3(a). */
+    const isSub = head.kind === "sub" && lastMainNumber;
+    const number = isSub ? `${lastMainNumber}(${head.label})` : head.label;
 
     const q = {
       id: `q${questions.length + 1}`,
@@ -91,13 +96,17 @@ export function detectQuestionsStructural(lines) {
       questionText,
       answerText,
       answerLineIds: answerIds,
+      /* Where the head sits in the document, so a rubric line ("answer any 3 of
+         the following") can tell which questions follow it. */
+      headIndex: head.index,
       maxMarks: marks ?? undefined,
       pageStart: head.page,
       pageEnd: byIndex.get(endIdx) ? byIndex.get(endIdx).page : head.page,
-      parentId: isSub ? lastMain.id : undefined,
+      parentId: isSub && lastMain ? lastMain.id : undefined,
     };
     questions.push(q);
-    if (!isSub) lastMain = q;
+    if (head.kind === "main") lastMain = q;
+    if (head.main) lastMainNumber = head.main;
   });
 
   // A parent that only introduces sub-parts carries no answer of its own.
