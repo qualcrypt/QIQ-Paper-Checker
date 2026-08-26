@@ -131,19 +131,57 @@ function inkMap(data, w, h) {
   const threshold = otsuThreshold(hist, counted);
   const rows = new Uint32Array(h);
   const ink = new Uint8Array(w * h);
+  /* Flat [x, y, x, y, …] of every inked pixel. The skew search re-projects the
+     ink a dozen times, and walking the ink itself rather than the whole page
+     makes that a tenth of the work. */
+  const coords = [];
 
   for (let y = y0; y < y1; y++) {
     let n = 0;
     for (let x = x0; x < x1; x++) {
       if (gray[y * w + x] <= threshold) {
         ink[y * w + x] = 1;
+        coords.push(x, y);
         n++;
       }
     }
     rows[y] = n;
   }
 
-  return { rows, ink, w, h, x0, x1, y0, y1, threshold };
+  return { rows, ink, coords, w, h, x0, x1, y0, y1, threshold };
+}
+
+/* How far off horizontal the search will look, as rise over run. ±0.06 is about
+   ±3.4°, which covers a page set down crooked on a scanner or a hand-held phone
+   photo. Beyond that the projection is not recoverable by shearing and the
+   confidence report is the honest answer. */
+const SKEW_SLOPES = [-0.06, -0.045, -0.03, -0.02, -0.01, 0, 0.01, 0.02, 0.03, 0.045, 0.06];
+
+/**
+ * Project the ink onto rows, correcting for a page that is not quite square.
+ *
+ * A tilted page smears every line of writing across several rows, so the peaks
+ * flatten, bands merge, and `alignBandsToLines` reports "low" — which withholds
+ * every mark on the page. Shearing before projecting recovers the peaks. It
+ * pivots on the horizontal centre, so a row at the centre of the page keeps its
+ * own y and the band coordinates need no inverse transform.
+ */
+function projectRows(coords, h, cx, slope) {
+  const rows = new Uint32Array(h);
+  for (let i = 0; i < coords.length; i += 2) {
+    const y = coords[i + 1] - Math.round(slope * (coords[i] - cx));
+    if (y >= 0 && y < h) rows[y]++;
+  }
+  return rows;
+}
+
+/* Sharper peaks mean better-aligned lines, and the sum of squares of the row
+   profile is the cheapest measure of peakiness there is: spreading the same ink
+   over more rows can only lower it. */
+function peakiness(rows) {
+  let sum = 0;
+  for (let y = 0; y < rows.length; y++) sum += rows[y] * rows[y];
+  return sum;
 }
 
 /** Median of a numeric list. Returns 0 for an empty one. */
@@ -164,8 +202,8 @@ function median(values) {
 export async function detectLineBands(dataUrl) {
   const { ctx, canvas, naturalWidth, naturalHeight } = await loadToCanvas(dataUrl);
   const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
-  const { threshold, bands } = bandsFromPixels(data, canvas.width, canvas.height);
-  return { width: naturalWidth, height: naturalHeight, threshold, bands };
+  const { threshold, bands, skew } = bandsFromPixels(data, canvas.width, canvas.height);
+  return { width: naturalWidth, height: naturalHeight, threshold, bands, skew };
 }
 
 /**
@@ -178,18 +216,38 @@ export async function detectLineBands(dataUrl) {
 export function bandsFromPixels(data, w, h) {
   const map = inkMap(data, w, h);
 
+  /* Square the page up before measuring it. Nothing downstream has to know: the
+     shear pivots on the centre column, so the bands come back in the page's own
+     coordinates either way. */
+  const cx = (map.x0 + map.x1) / 2;
+  let slope = 0;
+  if (map.coords.length >= 200) {
+    let best = -1;
+    for (const candidate of SKEW_SLOPES) {
+      const score = peakiness(projectRows(map.coords, h, cx, candidate));
+      /* Ties go to the straighter reading: a page that is already square must
+         not be shorn on the strength of rounding noise. */
+      if (score > best * 1.002) {
+        best = score;
+        slope = candidate;
+      }
+    }
+  }
+  const rows = slope === 0 ? map.rows : projectRows(map.coords, h, cx, slope);
+  const rowAt = (x, y) => y - Math.round(slope * (x - cx));
+
   /* A page-relative floor: a row needs more than a trace of ink to count as part
      of a line. Taken from the median inked row, so a sparse page and a dense one
      are treated alike. */
   const inked = [];
-  for (let y = map.y0; y < map.y1; y++) if (map.rows[y] > 0) inked.push(map.rows[y]);
+  for (let y = map.y0; y < map.y1; y++) if (rows[y] > 0) inked.push(rows[y]);
   const rowFloor = Math.max(2, median(inked) * 0.3);
 
   // Contiguous runs of inked rows.
   const runs = [];
   let start = -1;
   for (let y = map.y0; y < map.y1; y++) {
-    const on = map.rows[y] >= rowFloor;
+    const on = rows[y] >= rowFloor;
     if (on && start === -1) start = y;
     else if (!on && start !== -1) {
       runs.push([start, y - 1]);
@@ -215,31 +273,44 @@ export function bandsFromPixels(data, w, h) {
   for (const [top, bottom] of merged) {
     if (bottom - top + 1 < minHeight) continue;
 
-    // Horizontal extent of the writing inside this band.
+    /* Horizontal extent of the writing inside this band, measured over the ink
+       that actually belongs to it — which on a sheared page is not the same set
+       of pixels as the rectangle between `top` and `bottom`. */
     let left = map.x1;
     let right = map.x0;
+    let inkTop = h;
+    let inkBottom = 0;
     let total = 0;
 
-    for (let y = top; y <= bottom; y++) {
-      for (let x = map.x0; x < map.x1; x++) {
-        if (!map.ink[y * w + x]) continue;
-        if (x < left) left = x;
-        if (x > right) right = x;
-        total++;
-      }
+    for (let i = 0; i < map.coords.length; i += 2) {
+      const x = map.coords[i];
+      const y = map.coords[i + 1];
+      if (rowAt(x, y) < top || rowAt(x, y) > bottom) continue;
+      if (x < left) left = x;
+      if (x > right) right = x;
+      /* Reported where the ink really is, not where the deskewed projection put
+         it. On a crooked page a line of writing occupies a diagonal ribbon, and
+         a highlight has to cover the ribbon — the shear is how the lines were
+         told apart, not a claim about where they sit. */
+      if (y < inkTop) inkTop = y;
+      if (y > inkBottom) inkBottom = y;
+      total++;
     }
     if (right < left) continue; // no ink survived
 
     bands.push({
-      top: top / h,
-      bottom: (bottom + 1) / h,
+      top: inkTop / h,
+      bottom: (inkBottom + 1) / h,
       left: left / w,
       right: (right + 1) / w,
       ink: total,
     });
   }
 
-  return { threshold: map.threshold, bands };
+  /* Reported so the run can say the page was crooked and by how much, rather
+     than silently producing better numbers than the image deserves. */
+  const skewDegrees = Math.round(Math.atan(slope) * (180 / Math.PI) * 10) / 10;
+  return { threshold: map.threshold, bands, skew: skewDegrees };
 }
 
 /**
