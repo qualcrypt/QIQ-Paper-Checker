@@ -13,7 +13,15 @@
  * to wait it out rather than fail.
  */
 
-export const GROQ_BASE = (typeof window !== "undefined" && window.__GROQ_BASE__) || "/api/groq";
+/* The API base is same-origin in development (the Vite middleware answers
+   /api/groq); a production build points at the deployed backend via
+   VITE_API_URL. import.meta.env is undefined under plain Node, where this
+   module is imported only for its constants — the optional chain keeps that
+   safe. */
+const API_BASE =
+  (typeof import.meta !== "undefined" && import.meta.env && import.meta.env.VITE_API_URL) || "";
+
+export const GROQ_BASE = (typeof window !== "undefined" && window.__GROQ_BASE__) || `${API_BASE}/api/groq`;
 
 export const OCR_MODEL = "qwen/qwen3.6-27b";
 export const EVAL_MODEL = "openai/gpt-oss-120b";

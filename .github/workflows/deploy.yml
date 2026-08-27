@@ -1,0 +1,28 @@
+name: Deploy QIQ to production
+
+# Every push to main updates https://app.qiq.academy.
+# Requires repo secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY (see docs/DEPLOYMENT.md).
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull, rebuild and restart on the VPS
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -e
+            cd /var/www/qiq
+            git fetch origin main
+            git reset --hard origin/main
+            npm install            # postinstall runs `vite build`
+            pm2 restart qiq
+            echo "Deployed $(git rev-parse --short HEAD)"

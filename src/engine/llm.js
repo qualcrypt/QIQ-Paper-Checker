@@ -22,9 +22,13 @@ import { groqChat, EVAL_MODEL } from "./groq.js";
  * @param {object} opts
  * @param {(seconds: number) => void} [opts.onRetry]  Surface rate-limit waits.
  * @param {(stage: string) => void} [opts.onStage]    Progress for the UI.
+ * @param {Function} [opts.chat]  Transport for one completion, groqChat's
+ *   contract. Defaults to groqChat (the browser's same-origin proxy); the
+ *   server injects its own key-pooled client so this module stays reusable
+ *   off-browser without knowing where the keys live.
  * @returns {{callJson: Function, callText: Function}}
  */
-export function createLlm({ onRetry, onStage } = {}) {
+export function createLlm({ onRetry, onStage, chat = groqChat } = {}) {
   /**
    * One JSON round-trip.
    *
@@ -79,7 +83,7 @@ export function createLlm({ onRetry, onStage } = {}) {
 
     let out;
     try {
-      out = await groqChat(payload, onRetry);
+      out = await chat(payload, onRetry);
     } catch (e) {
       /* JSON mode can reject its own generation and still return the attempt.
          A recoverable draft beats losing the whole stage. */
@@ -113,7 +117,7 @@ export function createLlm({ onRetry, onStage } = {}) {
         )
       : user;
 
-    const { text } = await groqChat(
+    const { text } = await chat(
       {
         model,
         max_completion_tokens: maxTokens,

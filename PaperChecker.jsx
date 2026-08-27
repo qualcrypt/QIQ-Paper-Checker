@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 
 import { structureOcr, linesToText } from "./src/engine/ocr.js";
-import { groqChat, GroqError, OCR_MODEL, EVAL_MODEL } from "./src/engine/groq.js";
+import { groqChat, GroqError, GROQ_BASE, OCR_MODEL, EVAL_MODEL } from "./src/engine/groq.js";
 import { createLlm } from "./src/engine/llm.js";
 import { loadPdfJs, extractPdfText } from "./src/engine/pdf.js";
 import { isDocx, isLegacyDoc, extractDocxText, LEGACY_DOC_MESSAGE } from "./src/engine/docx.js";
@@ -1139,7 +1139,7 @@ export default function PaperChecker() {
    */
   async function poolSize() {
     try {
-      const res = await fetch("/api/groq/stats");
+      const res = await fetch(`${GROQ_BASE}/stats`);
       if (!res.ok) return 1;
       const { keys } = await res.json();
       return Math.max(1, Number(keys) || 1);
