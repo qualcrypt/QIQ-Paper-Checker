@@ -1,0 +1,29 @@
+# Render Blueprint — one-click deploy of QIQ Paper Checker on the free plan.
+#
+# Render dashboard → New → Blueprint → connect qualcrypt/QIQ-Paper-Checker.
+# Render reads this file and creates the service with everything below;
+# the only thing you type in is the GROQ_API_KEY value (sync: false entries
+# are prompted for in the dashboard and never stored in the repo).
+
+services:
+  - type: web
+    name: qiq-paper-checker
+    runtime: node
+    plan: free
+    # postinstall (npm run build) produces dist/ during install
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeploy: true            # every push to main redeploys
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: GROQ_API_KEY       # prompted at deploy time; server-side only
+        sync: false
+      # Optional hardening (defaults are fine):
+      # - key: GROQ_API_KEYS    # comma-separated pool for more headroom
+      #   sync: false
+      # - key: PROXY_RATE_LIMIT_PER_MIN
+      #   value: "120"
+      # - key: MAX_BODY_MB
+      #   value: "25"

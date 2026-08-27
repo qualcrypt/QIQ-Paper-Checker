@@ -39,9 +39,9 @@ npm install               # postinstall builds dist/
 npm start                 # server.js: dist/ + /api/groq on $PORT (default 3000)
 ```
 
-One Node process serves the frontend **and** the AI proxy. Full Hostinger
-VPS + Nginx + SSL + GitHub auto-deploy instructions are in
-[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+One Node process serves the frontend **and** the AI proxy. Deploy free on
+Render via the included `render.yaml` Blueprint, or self-host on a VPS —
+both paths are in [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Test
 

@@ -1,11 +1,11 @@
-name: Deploy QIQ to production
+name: Deploy QIQ to a VPS
 
-# Every push to main updates https://app.qiq.academy.
-# Requires repo secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY (see docs/DEPLOYMENT.md).
+# Manual trigger only (Actions tab → Run workflow). The primary hosting path
+# is Render (render.yaml), which auto-deploys from GitHub natively — this
+# workflow exists for the self-hosted VPS option in docs/DEPLOYMENT.md.
+# Requires repo secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY.
 
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 jobs:

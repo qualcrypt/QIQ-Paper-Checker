@@ -1,19 +1,15 @@
 # Deploying QIQ Paper Checker
 
-This document is the exact path from this repository to a live production
-deployment at **app.qiq.academy** on Hostinger, with GitHub auto-deploy on
-every push to `main`.
+Two supported paths. **Render Free** is the current production setup ($0);
+the Hostinger VPS path is kept as the self-hosted alternative.
 
-## What runs where
+## Architecture (same on both)
 
 ```
-Browser (app.qiq.academy)
+Browser (app.qiq.academy / *.onrender.com)
    │  HTTPS
    ▼
-Nginx on the Hostinger VPS  ── TLS termination (Let's Encrypt)
-   │  proxy_pass http://127.0.0.1:3000
-   ▼
-Node 20 process (server.js, kept alive by PM2)
+Node 20 process (server.js)
    ├─ serves the built React app from dist/
    └─ /api/groq/*  ── HTTPS ──►  api.groq.com   (Authorization attached
                                                  server-side from the
@@ -21,61 +17,93 @@ Node 20 process (server.js, kept alive by PM2)
 ```
 
 - **Frontend**: static build (`npm run build` → `dist/`), served by the same
-  Node process. No separate static hosting needed.
-- **AI keys**: live only in the server environment. The browser and the GitHub
-  repo never see them.
-- **qualcrypt.com** stays the marketing site (separate repo,
-  `qualcrypt/qualcrypt-website`) and links here via the "Try QIQ" button.
+  Node process — no separate static hosting.
+- **AI keys**: only in the host's environment variables. Never in the
+  browser, never in the repo.
+- **qualcrypt.com** stays on Hostinger (separate repo, untouched) and links
+  here via the "Try QIQ" button.
 
-## Prerequisites
+---
 
-1. A **Hostinger VPS plan** — Hostinger's shared/Premium/Business web hosting
-   runs PHP only and **cannot** run this Node.js app. Any VPS tier works; the
-   app is a single small Node process (256 MB RAM is plenty).
-2. The `qiq.academy` domain's DNS zone (Hostinger hPanel → Domains →
-   **DNS / Name Servers**, if the domain is managed at Hostinger).
-3. One or more Groq API keys from <https://console.groq.com/keys>.
+## Path 1 — Render Free (current, $0)
 
-## 1. DNS — point app.qiq.academy at the VPS
+### 1. Create the service from the Blueprint
 
-In the DNS zone for `qiq.academy`:
+1. Sign in at <https://render.com> with GitHub (grant access to
+   `qualcrypt/QIQ-Paper-Checker`).
+2. Dashboard → **New → Blueprint** → select the repo. Render reads
+   `render.yaml` and pre-fills everything (free plan, build, start, health
+   check, auto-deploy).
+3. When prompted, paste your **GROQ_API_KEY** (from
+   <https://console.groq.com/keys>). It is stored as a Render environment
+   variable — server-side only. Add more keys later as `GROQ_API_KEYS=a,b,c`
+   under the service's Environment tab for more per-minute headroom.
+4. **Apply** — Render runs `npm install` (the postinstall script builds
+   `dist/`), then `npm start`.
 
-| Type | Name | Value | TTL |
-|------|------|-------|-----|
-| A | `app` | `<your VPS IP>` | 300 |
+### 2. Verify the free URL
 
-## 2. Server setup (once)
-
-SSH into the VPS (`ssh root@<VPS IP>`), then:
+Render assigns `https://qiq-paper-checker.onrender.com`:
 
 ```bash
-# Node 20 LTS
+curl https://qiq-paper-checker.onrender.com/api/health     # {"ok":true,"keys":1}
+curl https://qiq-paper-checker.onrender.com/api/groq/stats # pool view, no keys
+```
+
+Then open the URL and run a full paper through: upload question paper +
+answer sheet → processing trace → evaluation → examiner review → report card.
+
+**Free-plan caveat:** the service sleeps after ~15 minutes idle; the first
+request after that waits ~30–60s for a cold start. Fine for a demo/early
+product; upgrade to a paid instance later to remove it.
+
+### 3. Custom domain — app.qiq.academy
+
+Render free web services support custom domains with free managed TLS:
+
+1. Render dashboard → your service → **Settings → Custom Domains** →
+   **Add Custom Domain** → `app.qiq.academy`.
+2. In the `qiq.academy` DNS zone (Hostinger hPanel → Domains → DNS, if
+   managed there) add:
+
+   | Type | Name | Value |
+   |------|------|-------|
+   | CNAME | `app` | `qiq-paper-checker.onrender.com` |
+
+3. Back in Render, click **Verify** — the certificate issues automatically.
+
+If the free plan ever refuses the custom domain, the app keeps working on
+the `.onrender.com` URL; point the "Try QIQ" button there instead.
+
+### 4. Automatic deployment
+
+Already on: `autoDeploy: true` in `render.yaml`. Every push to `main`
+rebuilds and redeploys — no GitHub Action needed for Render.
+
+---
+
+## Path 2 — Hostinger VPS (self-hosted alternative)
+
+> Note: Hostinger **shared** hosting (Premium/Business) runs PHP only and
+> cannot host this app. This path needs a VPS; it costs money, which is why
+> Render is the current setup.
+
+```bash
+# On the VPS (Ubuntu):
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
 apt-get install -y nodejs nginx certbot python3-certbot-nginx git
-
-# Process manager — restarts the app on crash/reboot
 npm install -g pm2
 
-# Clone the product
 mkdir -p /var/www && cd /var/www
 git clone https://github.com/qualcrypt/QIQ-Paper-Checker.git qiq
 cd qiq
-
-# Secrets — server-side only
-cp .env.example .env
-nano .env        # set GROQ_API_KEY (or GROQ_API_KEYS=a,b,c)
-
-# Install + build (postinstall runs `vite build` automatically)
-npm install
-
-# Start on port 3000 and survive reboots
+cp .env.example .env      # set GROQ_API_KEY
+npm install               # postinstall builds dist/
 PORT=3000 pm2 start server.js --name qiq
 pm2 save && pm2 startup
 ```
 
-## 3. Nginx + SSL for app.qiq.academy
-
-`/etc/nginx/sites-available/qiq`:
+Nginx (`/etc/nginx/sites-available/qiq`):
 
 ```nginx
 server {
@@ -93,54 +121,27 @@ server {
 ```bash
 ln -s /etc/nginx/sites-available/qiq /etc/nginx/sites-enabled/
 nginx -t && systemctl reload nginx
-certbot --nginx -d app.qiq.academy     # free HTTPS certificate
+certbot --nginx -d app.qiq.academy
 ```
 
-The app is now live at **https://app.qiq.academy**.
+DNS: `A` record `app.qiq.academy` → VPS IP. For push-to-deploy on this path,
+`.github/workflows/deploy.yml` can be run manually (Actions tab) with the
+`VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` repo secrets set.
 
-## 4. Automatic GitHub → VPS deployment
-
-This repo ships `.github/workflows/deploy.yml`. On every push to `main` it
-SSHes into the VPS, pulls, rebuilds and restarts the app.
-
-Set these once in **GitHub → repo → Settings → Secrets and variables →
-Actions**:
-
-| Secret | Value |
-|--------|-------|
-| `VPS_HOST` | your VPS IP |
-| `VPS_USER` | `root` (or your deploy user) |
-| `VPS_SSH_KEY` | private key allowed to SSH into the VPS |
-
-Generate the key on the VPS if needed: `ssh-keygen -t ed25519`, append the
-`.pub` to `~/.ssh/authorized_keys`, paste the **private** key into
-`VPS_SSH_KEY`.
-
-Every push to `main` then updates https://app.qiq.academy automatically.
-
-## 5. Verifying production
-
-```bash
-curl https://app.qiq.academy/api/health          # {"ok":true,"keys":N}
-curl https://app.qiq.academy/api/groq/stats      # pool view, no key values
-```
-
-Then open https://app.qiq.academy, upload a question paper + answer sheet,
-and watch the live processing trace through to the report card.
+---
 
 ## Environment variables
 
 | Variable | Where | Purpose |
 |----------|-------|---------|
-| `GROQ_API_KEY` / `GROQ_API_KEYS` | VPS `.env` | Groq keys, server-side only |
-| `PORT` | systemd/PM2 env | listen port (3000 behind Nginx) |
+| `GROQ_API_KEY` / `GROQ_API_KEYS` | Render env / VPS `.env` | Groq keys, server-side only |
+| `PORT` | set by Render automatically | listen port (3000 default locally) |
 | `PROXY_RATE_LIMIT_PER_MIN` | optional | per-IP ceiling on `/api/groq` (default 120) |
 | `MAX_BODY_MB` | optional | max request body (default 25) |
-| `VITE_API_URL` | build-time, optional | only needed for a split deployment where frontend and backend live on different origins |
+| `VITE_API_URL` | build-time, optional | only for a split deployment (frontend and backend on different origins) |
 
 ## Split deployment (optional later)
 
-The same codebase supports frontend-on-CDN + backend-elsewhere: build with
-`VITE_API_URL=https://api.example.com npm run build`, host `dist/` statically,
-and run `server.js` on the API host. Same-origin (the default above) is
-simpler and is what app.qiq.academy uses.
+Build with `VITE_API_URL=https://api.example.com npm run build`, host `dist/`
+statically, run `server.js` on the API host. Same-origin (the default) is
+what both paths above use.
