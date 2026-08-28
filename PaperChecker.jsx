@@ -138,8 +138,8 @@ const C = {
   blue: "#2563EB",
   purple: "#7C3AED",
   text: "#E2E8F0",
-  dim: "#94A3B8",
-  faint: "#64748B",
+  dim: "#B5C0D1",
+  faint: "#8492A8",
   green: "#22C55E",
   amber: "#F59E0B",
   red: "#EF4444",
@@ -420,7 +420,7 @@ function useSpeech() {
  * an OCR failure when nothing has been sent yet.
  */
 function PipelineBar({ step, running }) {
-  const steps = ["Upload", "OCR", "Evaluate", "Results"];
+  const steps = ["Upload", "Read Paper", "Mark Answers", "Results"];
   return (
     <div className="qiq-pipeline">
       {steps.map((label, i) => {
@@ -433,7 +433,7 @@ function PipelineBar({ step, running }) {
             </div>
             <span
               style={{
-                fontSize: 13,
+                fontSize: 15,
                 fontWeight: active || done ? 600 : 500,
                 color: active ? C.text : done ? C.dim : C.faint,
                 whiteSpace: "nowrap",
@@ -458,7 +458,7 @@ function Legend() {
       {["correct", "partial", "wrong", "missing"].map((t) => {
         const s = typeStyle(t);
         return (
-          <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 12, color: C.dim }}>
+          <span key={t} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, color: C.dim }}>
             <span
               style={{
                 width: 12,
@@ -477,11 +477,11 @@ function Legend() {
   );
 }
 
-function SectionTitle({ n, title, action }) {
+function SectionTitle({ n, title, action, compactTop = false }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "20px 0 10px" }}>
+    <div style={{ display: "flex", alignItems: "center", gap: 9, margin: `${compactTop ? -8 : 20}px 0 10px` }}>
       <span className="qiq-step-num">{n}</span>
-      <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase", color: C.dim }}>
+      <span style={{ fontSize: 15, fontWeight: 750, letterSpacing: 0.2, color: C.text }}>
         {title}
       </span>
       {action && <span style={{ marginLeft: "auto" }}>{action}</span>}
@@ -489,16 +489,16 @@ function SectionTitle({ n, title, action }) {
   );
 }
 
-/** ⚠️ marker shown wherever the model told us it was unsure. */
+/** Quiet label shown wherever a mark needs the teacher's attention. */
 function ConfidenceFlag({ confidence, compact }) {
   return (
     <span
       className={`qiq-warn${compact ? " is-compact" : ""}`}
-      title={`AI is unsure — please verify this mark manually (confidence ${Math.round(
+      title={`Please verify this mark manually (certainty ${Math.round(
         Number(confidence) || 0
       )}%)`}
     >
-      ⚠️
+      {compact ? "Check" : "Needs review"}
     </span>
   );
 }
@@ -520,6 +520,8 @@ export default function PaperChecker() {
   const [studentName, setStudentName] = useState("");
   const [subject, setSubject] = useState("");
   const [reportDate, setReportDate] = useState(todayLabel);
+  const [studentDetails, setStudentDetails] = useState([]);
+  const [markNotice, setMarkNotice] = useState("");
 
   const [studentAnswerText, setStudentAnswerText] = useState("");
   /* The transcript is held per page, because the page boundaries are what the
@@ -574,6 +576,7 @@ export default function PaperChecker() {
   const [examPages, setExamPages] = useState([]);
   const [exam, setExam] = useState(null);
   const [examBusy, setExamBusy] = useState(false);
+  const [examSources, setExamSources] = useState([]);
 
   /* Reference material, chunked and indexed locally. */
   const [refFiles, setRefFiles] = useState([]); // { name, chunks, pageCount }
@@ -919,10 +922,11 @@ export default function PaperChecker() {
     setError("");
     setExamBusy(true);
     try {
+      const incoming = Array.from(files || []);
       const collected = [];
       const digitalTexts = [];
       const cut = [];
-      for (const file of Array.from(files || [])) {
+      for (const file of incoming) {
         if (isLegacyDoc(file)) {
           setError(LEGACY_DOC_MESSAGE(file.name));
           continue;
@@ -946,6 +950,7 @@ export default function PaperChecker() {
       }
       setTruncated((prev) => prev.filter((x) => x.scope !== "question").concat(cut));
       if (collected.length === 0 && digitalTexts.length === 0) return;
+      setExamSources(incoming.map((file) => file.name));
 
       const withIds = collected.map((p, i) => ({ ...p, id: `qp-${Date.now()}-${i}` }));
       setExamPages(withIds);
@@ -1032,6 +1037,7 @@ export default function PaperChecker() {
   function clearExam() {
     setExam(null);
     setExamPages([]);
+    setExamSources([]);
   }
 
   /* -------------------------------------------------- reference PDFs ----- */
@@ -1130,7 +1136,7 @@ export default function PaperChecker() {
   }
 
   const onRetry = (seconds) =>
-    setNotice(`Groq's per-minute token limit was reached — resuming in ${seconds}s…`);
+    setNotice(`The marking service is briefly busy — continuing in ${seconds}s…`);
 
   /**
    * How many API keys the proxy is scheduling over. Each one supports another
@@ -1261,8 +1267,8 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 }`;
 
     step(
-      "Evaluating against the marking scheme",
-      `${marks} marks · ${answerText.length} characters of answer`
+      "Checking answers against the marking scheme",
+      `${marks} marks available · answer ready to mark`
     );
 
     let out;
@@ -1295,7 +1301,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
     setReasoning(out.reasoning);
     const parsed = extractJson(out.text);
     step(
-      "Evaluation returned",
+      "Marking complete",
       `${(parsed.keyPoints || []).length} key point(s) · ${(parsed.annotations || []).length} annotation(s)`,
       "ok"
     );
@@ -1504,8 +1510,8 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
         `Q${a.number}`,
         a.skipped
           ? "no answer found on the paper"
-          : `${a.method === "label" ? "found by its written number" : "located by the model"} · ` +
-            `${a.confidence}% confidence · ${a.answerText.length} characters${where}`,
+          : `${a.method === "label" ? "found by its written number" : "matched to this question"} · ` +
+            `${a.confidence}% certainty · ${a.answerText.length} characters${where}`,
         a.skipped ? "warn" : "ok"
       );
     }
@@ -1520,7 +1526,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
       warnings.push(
         `Possible missed answer: ${unassignedChars} characters of student writing ` +
           `(${unassignedLineIds.length} line${unassignedLineIds.length === 1 ? "" : "s"}) could not be ` +
-          `assigned to any question. Review the Raw OCR Text tab before finalising marks.`
+          `assigned to any question. Check the Answer Text tab before finalising marks.`
       );
     }
 
@@ -1598,8 +1604,8 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
         step(
           `Marked ${label}`,
           question.failed
-            ? "evaluation failed — left unmarked for the examiner"
-            : `${question.marksAwarded}/${question.maxMarks} marks · ${question.grounding === GROUNDING.REFERENCE ? "supported by the reference" : question.grounding === GROUNDING.INSUFFICIENT ? "reference insufficient" : "general knowledge"} · ${question.confidence}% confidence`,
+            ? "marking could not finish — left for the teacher to review"
+            : `${question.marksAwarded}/${question.maxMarks} marks · ${question.grounding === GROUNDING.REFERENCE ? "based on the reference" : question.grounding === GROUNDING.INSUFFICIENT ? "reference did not cover this" : "based on subject knowledge"} · ${question.confidence}% certainty`,
           question.failed ? "warn" : "ok"
         );
       },
@@ -1607,7 +1613,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
     setPhase("review");
     setNotice("Writing the final remark…");
-    step("Writing the examiner's remark", `${paper.totalMarks}/${paper.maximumMarks} · grade ${paper.grade}`);
+    step("Preparing the teacher's summary", `${paper.totalMarks}/${paper.maximumMarks} · grade ${paper.grade}`);
     const remark = await summarisePaper({ paper, llm });
 
     setRawResponse(JSON.stringify(paper, null, 2));
@@ -1631,14 +1637,14 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
     const text = String(sourceText !== undefined ? sourceText : editedText || studentAnswerText).trim();
     if (!text) {
-      setError("There is no extracted answer text to evaluate.");
+      setError("There is no readable answer text to mark.");
       return;
     }
 
     setError("");
     setActiveAnn(null);
     beginTrace();
-    step("Re-grading", "the vision pass is skipped — marking the text as it stands now", "start");
+    step("Marking again", "using the corrected answer text", "start");
     try {
       setStage("evaluating");
       setCoverageInfo(null);
@@ -1685,6 +1691,30 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
     saveHistory([]);
   }
 
+  const answerPaperReady = pages.length > 0 || !!textDoc;
+  const markingBasisReady = examMode
+    ? !exam.blocking
+    : expectedAnswer.trim().length > 0 && Number(totalMarks) > 0;
+  const readyToCheck = answerPaperReady && markingBasisReady;
+
+  const addStudentDetail = () =>
+    setStudentDetails((rows) => rows.concat({ id: Date.now(), label: "", value: "" }));
+  const updateStudentDetail = (id, field, value) =>
+    setStudentDetails((rows) => rows.map((row) => (row.id === id ? { ...row, [field]: value } : row)));
+  const removeStudentDetail = (id) =>
+    setStudentDetails((rows) => rows.filter((row) => row.id !== id));
+
+  const updateFinalMark = (i, value) => {
+    setMarkOverrides((prev) => {
+      const next = { ...prev };
+      if (value === null) delete next[i];
+      else next[i] = value;
+      return next;
+    });
+    setMarkNotice("Mark updated");
+    window.setTimeout(() => setMarkNotice(""), 1800);
+  };
+
   /* ============================================================== RENDER === */
   return (
     <div className="qiq-root">
@@ -1694,11 +1724,11 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div className="qiq-logo">Q</div>
           <div>
-            <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: -0.2 }}>
-              QIQ <span style={{ color: C.faint, fontWeight: 500 }}>/</span> Descriptive Paper Checker
+            <div className="qiq-brand-title">
+              QIQ <span style={{ color: C.faint, fontWeight: 500 }}>/</span> Paper Checker for Educators
             </div>
-            <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>
-              Groq · {OCR_MODEL} vision OCR · {EVAL_MODEL} examiner
+            <div className="qiq-brand-subtitle">
+              Upload the papers, review the marking, and create a student-ready report
             </div>
           </div>
         </div>
@@ -1711,6 +1741,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
           <SectionTitle
             n="1"
             title="Question paper"
+            compactTop
             action={
               exam && (
                 <button className="qiq-mini-btn" onClick={clearExam}>
@@ -1733,25 +1764,39 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     e.target.value = "";
                   }}
                 />
-                <div style={{ fontSize: 13, fontWeight: 600 }}>
-                  {examBusy ? "Reading the question paper…" : "Upload the question paper"}
+                <div className="qiq-upload-icon" aria-hidden="true">{examBusy ? "…" : "1"}</div>
+                <div className="qiq-upload-body">
+                  <div className="qiq-upload-title">
+                    {examBusy ? "Reading the question paper…" : "Choose question paper"}
+                  </div>
+                  <div className="qiq-upload-copy">
+                    PDF, Word, scan, or photo. Questions and marks are read automatically.
+                  </div>
                 </div>
-                <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
-                  PDF, Word, scan or photo — QIQ reads the questions and their marks
-                </div>
+                {!examBusy && <span className="qiq-upload-action">Browse files</span>}
               </label>
               <TruncatedNotice items={truncated.filter((x) => x.scope === "question")} />
-              <div className="qiq-hint">
-                Optional. Without one, QIQ falls back to the marking-scheme flow below.
+              <div className="qiq-hint qiq-optional-note">
+                No question paper? Use a marking scheme below instead.
               </div>
             </>
           )}
 
-          {exam && <ExamPanel exam={exam} onMarks={setQuestionMarks} onChoice={setChoiceRequired} />}
+          {exam && (
+            <>
+              <div className="qiq-upload-confirm">
+                <span>✓</span>
+                <span>
+                  <strong>{examSources.join(", ") || "Question paper"}</strong> uploaded · {exam.questions.length} questions found
+                </span>
+              </div>
+              <ExamPanel exam={exam} onMarks={setQuestionMarks} onChoice={setChoiceRequired} />
+            </>
+          )}
 
           <SectionTitle
             n="2"
-            title="Reference material"
+            title="Reference material · Optional"
             action={
               refFiles.length > 0 && (
                 <button className="qiq-mini-btn" onClick={clearReferences}>
@@ -1760,7 +1805,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               )
             }
           />
-          <label className="qiq-drop qiq-drop-sm">
+          <label className={`qiq-drop qiq-drop-sm${refFiles.length ? " is-complete" : ""}`}>
             <input
               type="file"
               accept="application/pdf,.doc,.docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/msword"
@@ -1771,13 +1816,28 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                 e.target.value = "";
               }}
             />
-            <div style={{ fontSize: 13, fontWeight: 600 }}>
-              {refBusy ? "Indexing…" : "Add reference files"}
+            <div className="qiq-upload-icon is-optional" aria-hidden="true">{refBusy ? "…" : "2"}</div>
+            <div className="qiq-upload-body">
+              <div className="qiq-upload-title">
+                {refBusy ? "Preparing reference material…" : "Choose reference material"}
+              </div>
+              <div className="qiq-upload-copy">
+                Textbook, notes, syllabus, or model answers to guide marking.
+              </div>
             </div>
-            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
-              Textbook, notes, syllabus or model answers — marked against these first
-            </div>
+            {!refBusy && (
+              <span className="qiq-upload-action">{refFiles.length ? "Add more files" : "Browse files"}</span>
+            )}
           </label>
+
+          {refFiles.length > 0 && (
+            <div className="qiq-upload-confirm">
+              <span>✓</span>
+              <span>
+                {refFiles.length} reference {refFiles.length === 1 ? "file" : "files"} uploaded successfully
+              </span>
+            </div>
+          )}
 
           {refFiles.length > 0 && (
             <div className="qiq-reflist">
@@ -1788,36 +1848,36 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     {f.name}
                   </span>
                   <span style={{ color: C.faint }}>
-                    {f.pageCount}p · {f.chunks} chunks
+                    {f.pageCount} page{f.pageCount === 1 ? "" : "s"} · {f.chunks} searchable section{f.chunks === 1 ? "" : "s"}
                     {f.scanned && (
                       <span
                         style={{ color: C.amber }}
-                        title="This PDF had no text layer, so each page was transcribed by the vision model. Retrieval is only as good as that transcription."
+                        title="This file is a scan, so each page was read from its image. Please check unclear text before finalising marks."
                       >
                         {" "}
-                        · read as a scan
+                        · scanned copy
                       </span>
                     )}
                   </span>
                 </div>
               ))}
               <div className="qiq-hint" style={{ marginTop: 2 }}>
-                {refChunks.length} searchable passages indexed locally.
+                {refChunks.length} reference section{refChunks.length === 1 ? "" : "s"} ready for marking.
               </div>
               <TruncatedNotice items={truncated.filter((x) => x.scope === "reference")} />
             </div>
           )}
           {refFiles.length === 0 && (
             <div className="qiq-hint">
-              Optional. Without it, marking falls back to the model's own knowledge and says so.
+              No reference: marking uses general subject knowledge.
             </div>
           )}
 
-          <SectionTitle n="3" title="Answer paper" />
+          <SectionTitle n="3" title="Student answer sheet · Required" />
 
           <label
             id="qiq-field-pages"
-            className={`qiq-drop${dragging ? " is-dragging" : ""}${invalid === "pages" ? " qiq-invalid" : ""}`}
+            className={`qiq-drop${pages.length || textDoc ? " is-complete" : ""}${dragging ? " is-dragging" : ""}${invalid === "pages" ? " qiq-invalid" : ""}`}
             onDragOver={(e) => {
               e.preventDefault();
               setDragging(true);
@@ -1839,14 +1899,32 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                 e.target.value = "";
               }}
             />
-            <div className="qiq-drop-icon">{preparing ? <span className="qiq-spinner" /> : "⬆"}</div>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>
-              {preparing ? "Preparing pages…" : "Drop the answer sheet here"}
+            <div className="qiq-drop-icon">{preparing ? <span className="qiq-spinner" /> : "↑"}</div>
+            <div className="qiq-upload-body">
+              <div className="qiq-upload-title is-large">
+                {preparing ? "Preparing answer pages…" : "Choose the student's answer sheet"}
+              </div>
+              <div className="qiq-upload-copy">
+                Drag and drop a PDF, Word document, JPG, or PNG. Scanned and handwritten answer sheets are supported.
+              </div>
             </div>
-            <div style={{ fontSize: 12, color: C.faint, marginTop: 4 }}>
-              or click to browse · PDF, Word, JPG, PNG · handwriting supported
-            </div>
+            {!preparing && (
+              <span className="qiq-upload-action">
+                {pages.length || textDoc ? "Add more answer files" : "Browse answer files"}
+              </span>
+            )}
           </label>
+
+          {(pages.length > 0 || textDoc) && (
+            <div className="qiq-upload-confirm">
+              <span>✓</span>
+              <span>
+                {textDoc
+                  ? `${textDoc.name} uploaded successfully`
+                  : `${pages.length} answer ${pages.length === 1 ? "page" : "pages"} uploaded successfully`}
+              </span>
+            </div>
+          )}
 
           <TruncatedNotice items={truncated.filter((x) => x.scope === "answer")} />
 
@@ -1856,10 +1934,10 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                 <div key={p.id} className="qiq-file">
                   <img src={p.dataUrl} alt="" className="qiq-thumb" />
                   <div style={{ minWidth: 0, flex: 1 }}>
-                    <div className="qiq-ellipsis" style={{ fontSize: 13, fontWeight: 500 }}>
+                    <div className="qiq-ellipsis" style={{ fontSize: 15, fontWeight: 500 }}>
                       {p.label}
                     </div>
-                    <div style={{ fontSize: 11, color: C.faint }}>
+                    <div style={{ fontSize: 13, color: C.faint }}>
                       page {i + 1} · {(p.dataUrl.length / 1365).toFixed(0)} KB
                     </div>
                   </div>
@@ -1876,11 +1954,11 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               <div className="qiq-file">
                 <span className="qiq-reficon">📄</span>
                 <div style={{ minWidth: 0, flex: 1 }}>
-                  <div className="qiq-ellipsis" style={{ fontSize: 13, fontWeight: 500 }}>
+                  <div className="qiq-ellipsis" style={{ fontSize: 15, fontWeight: 500 }}>
                     {textDoc.name}
                   </div>
-                  <div style={{ fontSize: 11, color: C.faint }}>
-                    Word document · text read directly, no OCR needed
+                  <div style={{ fontSize: 13, color: C.faint }}>
+                    Word document · ready to mark
                   </div>
                 </div>
                 <button className="qiq-x" onClick={() => setTextDoc(null)} disabled={busy} title="Remove">
@@ -1890,21 +1968,63 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             </div>
           )}
 
-          <SectionTitle n="4" title="Student" />
-          <div style={{ display: "grid", gap: 8 }}>
-            <input
-              className="qiq-input"
-              value={studentName}
-              onChange={(e) => setStudentName(e.target.value)}
-              placeholder="Student name (appears on the report)"
-            />
-            <input
-              className="qiq-input"
-              value={subject}
-              onChange={(e) => setSubject(e.target.value)}
-              placeholder="Subject, e.g. Biology"
-            />
-          </div>
+          <details className="qiq-collapsible">
+            <summary className="qiq-collapsible-summary">
+              <span className="qiq-step-num">4</span>
+              <span className="qiq-collapsible-title">Student details · Optional</span>
+              {(studentName.trim() || subject.trim() || studentDetails.some((row) => row.value.trim())) && (
+                <span className="qiq-collapsible-value">
+                  {[studentName.trim(), subject.trim(), ...studentDetails.map((row) => row.value.trim())]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+              )}
+              <span className="qiq-collapsible-chevron" aria-hidden="true">⌄</span>
+            </summary>
+            <div className="qiq-collapsible-body">
+              <input
+                className="qiq-input"
+                value={studentName}
+                onChange={(e) => setStudentName(e.target.value)}
+                placeholder="Student name for the report"
+              />
+              <input
+                className="qiq-input"
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
+                placeholder="Subject, for example Biology"
+              />
+              {studentDetails.map((row) => (
+                <div className="qiq-detail-row" key={row.id}>
+                  <input
+                    className="qiq-input"
+                    value={row.label}
+                    onChange={(e) => updateStudentDetail(row.id, "label", e.target.value)}
+                    placeholder="Field, for example Roll number"
+                    aria-label="Student detail field name"
+                  />
+                  <input
+                    className="qiq-input"
+                    value={row.value}
+                    onChange={(e) => updateStudentDetail(row.id, "value", e.target.value)}
+                    placeholder="Value"
+                    aria-label={row.label || "Student detail value"}
+                  />
+                  <button
+                    className="qiq-detail-remove"
+                    type="button"
+                    onClick={() => removeStudentDetail(row.id)}
+                    aria-label="Remove this student detail"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button className="qiq-add-detail" type="button" onClick={addStudentDetail}>
+                Add another detail
+              </button>
+            </div>
+          </details>
 
           {/* The question paper supplies the questions and their marks, so these
               two inputs are only needed for the original scheme-based flow. */}
@@ -1973,23 +2093,23 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             </div>
           )}
 
-          <button className="qiq-btn" onClick={checkPaper} disabled={busy || preparing}>
+          <button className="qiq-btn qiq-primary-action" onClick={checkPaper} disabled={busy || preparing || !readyToCheck}>
             {busy ? (
               <>
                 <span className="qiq-spinner" />
-                {stage === "ocr" ? "Reading paper…" : "Evaluating…"}
+                {stage === "ocr" ? "Reading paper…" : "Marking answers…"}
               </>
             ) : evaluation ? (
-              "Check Paper again"
+              "Check this paper again"
             ) : (
-              "Check Paper"
+              "Start checking paper"
             )}
           </button>
 
           {evaluation && !busy && (
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
               <button className="qiq-btn qiq-btn-ghost" onClick={() => reEvaluate()} style={{ flex: 1 }}>
-                Re-grade only
+                Mark again
               </button>
               <button className="qiq-btn qiq-btn-ghost" onClick={resetAll} style={{ flex: 1 }}>
                 New paper
@@ -1999,9 +2119,9 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
           <HistoryPanel history={history} onClear={clearHistory} />
 
-          <p style={{ fontSize: 11, color: C.faint, marginTop: 14, lineHeight: 1.6 }}>
-            “Re-grade only” reuses the text already extracted, so you can tweak the marking scheme or fix
-            OCR mistakes without paying for another vision pass.
+          <p style={{ fontSize: 13, color: C.faint, marginTop: 14, lineHeight: 1.6 }}>
+            “Mark again” uses the answer text already read, so you can adjust the marking scheme or correct
+            misread words without reading every page again.
           </p>
         </aside>
 
@@ -2021,17 +2141,23 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             />
           )}
 
-          {!busy && !evaluation && <EmptyState hasPages={pages.length > 0} />}
+          {!busy && !evaluation && (
+            <EmptyState
+              hasPages={pages.length > 0 || !!textDoc}
+              hasExam={!!exam}
+              hasReference={refFiles.length > 0}
+            />
+          )}
 
           {!busy && evaluation && (
             <>
               <div className="qiq-tabs qiq-noprint">
                 {[
-                  ["review", "Evaluate"],
-                  ["paper", "Marked Paper"],
-                  ["annotated", "Annotated Text"],
-                  ["score", "Report Card"],
-                  ["raw", "Raw OCR Text"],
+                  ["review", "Review Marks"],
+                  ["paper", "Student Answer Sheet"],
+                  ["annotated", "Text & Comments"],
+                  ["score", "Final Report"],
+                  ["raw", "Answer Text"],
                 ].map(([id, label]) => (
                   <button
                     key={id}
@@ -2040,8 +2166,8 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                   >
                     {label}
                     {id === "review" && reviewIssueCount > 0 && (
-                      <span className="qiq-tab-warn" title={`${reviewIssueCount} item(s) need the examiner's attention`}>
-                        ⚠️ {reviewIssueCount}
+                      <span className="qiq-tab-warn" title={`${reviewIssueCount} item(s) need the teacher's attention`}>
+                        {reviewIssueCount}
                       </span>
                     )}
                     {id === "score" && (
@@ -2051,7 +2177,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     )}
                     {id === "paper" && lowConfidenceCount > 0 && (
                       <span className="qiq-tab-warn" title={`${lowConfidenceCount} mark(s) need manual review`}>
-                        ⚠️ {lowConfidenceCount}
+                        {lowConfidenceCount}
                       </span>
                     )}
                   </button>
@@ -2064,18 +2190,13 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     evaluation={evaluation}
                     keyPoints={displayKeyPoints}
                     markOverrides={markOverrides}
-                    onOverride={(i, value) =>
-                      setMarkOverrides((prev) => {
-                        const next = { ...prev };
-                        if (value === null) delete next[i];
-                        else next[i] = value;
-                        return next;
-                      })
-                    }
+                    onOverride={updateFinalMark}
+                    markNotice={markNotice}
                     awarded={scoreAwarded}
                     total={scoreTotal}
                     grade={effectiveGrade}
                     hasPages={pages.length > 0}
+                    hasReference={refFiles.length > 0}
                     geometryByPage={geometryByPage}
                     onViewOnPage={viewQuestionOnPage}
                     onRetryEval={() => reEvaluate()}
@@ -2131,6 +2252,9 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     setSubject={setSubject}
                     reportDate={reportDate}
                     setReportDate={setReportDate}
+                    hasReference={refFiles.length > 0}
+                    studentDetails={studentDetails}
+                    setStudentDetails={setStudentDetails}
                   />
                 )}
                 {tab === "raw" && (
@@ -2155,18 +2279,38 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
 /* ============================================================ PIECES ====== */
 
-function EmptyState({ hasPages }) {
+function EmptyState({ hasPages, hasExam, hasReference }) {
+  const steps = [
+    { done: hasExam, label: "Question paper", note: hasExam ? "Questions and marks added" : "Recommended to save setup time" },
+    { done: hasReference, label: "Reference material", note: hasReference ? "Ready to guide marking" : "Optional — textbook, notes, or model answers" },
+    { done: hasPages, label: "Student answer paper", note: hasPages ? "Ready to be checked" : "Required before checking" },
+  ];
   return (
     <div className="qiq-empty">
-      <div className="qiq-empty-icon">📝</div>
-      <div style={{ fontSize: 16, fontWeight: 600, color: C.text }}>
-        {hasPages ? "Ready to grade" : "No paper checked yet"}
+      <div className="qiq-empty-kicker">New paper</div>
+      <div className="qiq-empty-icon">✓</div>
+      <div className="qiq-empty-title">
+        {hasPages ? "Your answer paper is ready" : "Set up a paper in three simple steps"}
       </div>
-      <p style={{ fontSize: 13, color: C.faint, maxWidth: 420, lineHeight: 1.7, marginTop: 8 }}>
+      <p className="qiq-empty-copy">
         {hasPages
-          ? "Add the marking scheme on the left, set the total marks, then press Check Paper."
-          : "Upload a scanned or typed answer sheet, describe what a full-mark answer should cover, and QIQ will read, annotate and grade it the way an experienced teacher would."}
+          ? "Review the setup below, then use the button at the bottom of the left panel to begin checking."
+          : "Use the upload panel on the left. QIQ accepts typed documents, scans, phone photos, and handwritten work."}
       </p>
+      <div className="qiq-setup-list">
+        {steps.map((item, i) => (
+          <div key={item.label} className={`qiq-setup-item${item.done ? " is-done" : ""}`}>
+            <span className="qiq-setup-status">{item.done ? "✓" : i + 1}</span>
+            <span>
+              <strong>{item.label}</strong>
+              <small>{item.note}</small>
+            </span>
+          </div>
+        ))}
+      </div>
+      <div className="qiq-privacy-note">
+        🔒 Your access key stays protected on the server. Uploaded pages are sent securely for reading and marking.
+      </div>
     </div>
   );
 }
@@ -2192,19 +2336,19 @@ function Processing({ stage, phase, elapsed, progress, notice, marking, coverage
       sub:
         progress.total > 1
           ? `Transcribing page ${Math.min(progress.done + 1, progress.total)} of ${progress.total}, handwriting included`
-          : "Vision model is transcribing the page, handwriting included",
+          : "Reading the page, including handwriting",
     },
     { id: "measure", title: "Detecting handwriting position", sub: "Measuring where the ink sits on each page" },
     { id: "match", title: "Mapping answers to questions", sub: "Linking each block of writing to its question number" },
     {
       id: "mark",
-      title: "Evaluating answers",
+      title: "Marking answers",
       sub:
         marking && marking.total > 0
           ? `Marking ${marking.label || "question"} — ${Math.min(marking.done + 1, marking.total)} of ${marking.total}`
           : "Reasoning through the marking scheme and partial credit",
     },
-    { id: "review", title: "Preparing examiner review", sub: "Writing the final remark and coverage summary" },
+    { id: "review", title: "Preparing teacher review", sub: "Writing the final comment and answer summary" },
   ].filter((s) => order.includes(s.id));
 
   const current = Math.max(0, order.indexOf(phase === "idle" ? stage : phase));
@@ -2253,7 +2397,7 @@ function Processing({ stage, phase, elapsed, progress, notice, marking, coverage
 
       {/* what actually happened, as it happens */}
       <div className="qiq-trace" ref={feed}>
-        {trace.length === 0 && <div className="qiq-trace-idle">Waking the pipeline…</div>}
+        {trace.length === 0 && <div className="qiq-trace-idle">Preparing to read the paper…</div>}
 
         {trace.map((e, i) => (
           <div key={i} className={`qiq-trace-row is-${e.kind}`}>
@@ -2297,7 +2441,7 @@ function TruncatedNotice({ items }) {
           {x.scope === "question"
             ? "Questions past that point are not on the paper being marked."
             : x.scope === "reference"
-            ? "Material past that point is not searchable and cannot support a mark."
+            ? "Material past that point cannot be used when marking."
             : "Answers past that point will not be read or marked."}{" "}
           Split the file and upload the rest as a second file.
         </div>
@@ -2316,7 +2460,7 @@ function HistoryPanel({ history, onClear }) {
   return (
     <div style={{ marginTop: 22 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-        <span style={{ fontSize: 12, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase", color: C.dim }}>
+        <span style={{ fontSize: 14, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase", color: C.dim }}>
           Recent checks
         </span>
         <button className="qiq-mini-btn" style={{ marginLeft: "auto" }} onClick={onClear}>
@@ -2344,13 +2488,13 @@ function HistoryPanel({ history, onClear }) {
                 {trend}
               </span>
               <div style={{ minWidth: 0, flex: 1 }}>
-                <div className="qiq-ellipsis" style={{ fontSize: 12.5, fontWeight: 600, color: C.text }}>
+                <div className="qiq-ellipsis" style={{ fontSize: 14, fontWeight: 600, color: C.text }}>
                   {h.studentName}
                 </div>
-                <div className="qiq-ellipsis" style={{ fontSize: 10.5, color: C.faint }}>
+                <div className="qiq-ellipsis" style={{ fontSize: 12.5, color: C.faint }}>
                   {h.subject} · {h.date}
                   {h.pending > 0 && (
-                    <span style={{ color: C.amber }} title="Some questions could not be marked automatically">
+                    <span style={{ color: C.amber }} title="Some questions still need the teacher's mark">
                       {" "}
                       · {h.pending} pending
                     </span>
@@ -2358,14 +2502,14 @@ function HistoryPanel({ history, onClear }) {
                 </div>
               </div>
               <div style={{ textAlign: "right" }}>
-                <div style={{ fontSize: 12.5, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
-                  {h.overrides > 0 && <span title={`Examiner adjusted ${h.overrides} mark(s); the AI proposed ${h.aiScore}/${h.totalMarks}`}>✎ </span>}
+                <div style={{ fontSize: 14, fontWeight: 700, color: C.text, fontVariantNumeric: "tabular-nums" }}>
+                  {h.overrides > 0 && <span title={`Teacher adjusted ${h.overrides} mark(s); the original suggestion was ${h.aiScore}/${h.totalMarks}`}>✎ </span>}
                   {h.score}/{h.totalMarks}
                 </div>
                 {h.overrides > 0 && Number.isFinite(h.aiScore) && h.aiScore !== h.score && (
-                  <div style={{ fontSize: 9.5, color: C.faint }}>AI {h.aiScore}</div>
+                  <div style={{ fontSize: 12, color: C.faint }}>Suggested {h.aiScore}</div>
                 )}
-                <div style={{ fontSize: 10.5, fontWeight: 700, color: gradeColor(h.grade) }}>{h.grade}</div>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: gradeColor(h.grade) }}>{h.grade}</div>
               </div>
             </div>
           );
@@ -2381,11 +2525,14 @@ function HistoryPanel({ history, onClear }) {
  * different claims, and a student is entitled to know which one they were
  * marked on.
  */
-function GroundingBadge({ grounding }) {
+function GroundingBadge({ grounding, hasReference = true }) {
   const map = {
-    [GROUNDING.REFERENCE]: ["is-ref", "From reference"],
-    [GROUNDING.GENERAL]: ["is-general", "General knowledge"],
-    [GROUNDING.INSUFFICIENT]: ["is-insufficient", "Reference insufficient"],
+    [GROUNDING.REFERENCE]: ["is-ref", "Used reference material"],
+    [GROUNDING.GENERAL]: ["is-general", "Used subject knowledge"],
+    [GROUNDING.INSUFFICIENT]: [
+      "is-insufficient",
+      hasReference ? "Reference did not cover this question" : "No reference material was provided",
+    ],
   };
   const [cls, label] = map[grounding] || map[GROUNDING.GENERAL];
   return <span className={`qiq-ground ${cls}`}>{label}</span>;
@@ -2401,17 +2548,36 @@ function GroundingBadge({ grounding }) {
  * honest alternative to a confident guess that then caps a real student's score.
  */
 function ExamPanel({ exam, onMarks, onChoice }) {
-  const missing = exam.questions.filter((q) => q.maxMarks === null).length;
+  const [originalMissingIds] = useState(
+    () => new Set(exam.questions.filter((q) => q.maxMarks === null).map((q) => q.id))
+  );
+  const correctionQuestions = exam.questions.filter((q) => originalMissingIds.has(q.id));
+  const missingQuestions = correctionQuestions.filter((q) => q.maxMarks === null);
+  const missing = missingQuestions.length;
+  const completeQuestions = exam.questions.filter((q) => !originalMissingIds.has(q.id));
   const choice = Array.isArray(exam.choice) ? exam.choice : [];
+  const missingGroups = [];
+  for (const question of correctionQuestions) {
+    const number = String(question.number || "");
+    const base = (/^\s*(\d+)/.exec(number) || [null, number])[1];
+    const last = missingGroups[missingGroups.length - 1];
+    if (last && last.base === base) last.questions.push(question);
+    else missingGroups.push({ base, questions: [question] });
+  }
+  const missingRows = missingGroups.flatMap((group) => {
+    const rows = [];
+    for (let i = 0; i < group.questions.length; i += 2) rows.push(group.questions.slice(i, i + 2));
+    return rows;
+  });
 
   return (
     <div className="qiq-exam">
       <div className="qiq-exam-head">
         <div style={{ minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
+          <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>
             {exam.title || "Question paper"}
           </div>
-          <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+          <div style={{ fontSize: 13.5, color: C.faint, marginTop: 2 }}>
             {exam.subject ? exam.subject + " · " : ""}
             {exam.questions.length} question{exam.questions.length === 1 ? "" : "s"}
           </div>
@@ -2420,11 +2586,11 @@ function ExamPanel({ exam, onMarks, onChoice }) {
           <span style={{ fontSize: 17, fontWeight: 800, color: missing ? C.amber : C.green }}>
             {exam.totalMarks}
           </span>
-          <span style={{ fontSize: 10.5, color: C.faint, display: "block" }}>
+          <span style={{ fontSize: 12.5, color: C.faint, display: "block" }}>
             {choice.length ? "marks to be earned" : "total marks"}
           </span>
           {choice.length > 0 && exam.printedMarks !== exam.totalMarks && (
-            <span style={{ fontSize: 9.5, color: C.faint, display: "block" }}>
+            <span style={{ fontSize: 12, color: C.faint, display: "block" }}>
               {exam.printedMarks} printed
             </span>
           )}
@@ -2456,14 +2622,53 @@ function ExamPanel({ exam, onMarks, onChoice }) {
         </div>
       ))}
 
+      {correctionQuestions.length > 0 && (
+        <div className={`qiq-missing-marks${missing === 0 ? " is-complete" : ""}`} role="status">
+          <div className="qiq-missing-marks-head">
+            <span className="qiq-missing-icon">{missing === 0 ? "✓" : "!"}</span>
+            <span>
+              <strong>{missing === 0 ? "All question marks are ready" : "Marks needed before grading"}</strong>
+              <small>
+                {missing === 0
+                  ? "Your marks have been saved. You can review them here or continue to check the paper."
+                  : "These values were not visible on the question paper. Enter them here."}
+              </small>
+            </span>
+          </div>
+          <div className="qiq-missing-marks-fields">
+            {missingRows.map((row, rowIndex) => (
+              <div key={row.map((q) => q.id).join("-")} className="qiq-missing-mark-row">
+                {row.map((q, questionIndex) => (
+                  <label key={q.id} className="qiq-missing-mark-field">
+                    <span className="qiq-missing-question" title={q.text || `Question ${q.number}`}>
+                      <strong>Q{q.number}</strong>
+                      <small>{q.text || "Question wording was not read"}</small>
+                    </span>
+                    <input
+                      className="qiq-exam-marks"
+                      type="number"
+                      min="1"
+                      value={q.maxMarks === null ? "" : q.maxMarks}
+                      placeholder="Marks"
+                      onChange={(e) => onMarks(q.id, e.target.value)}
+                      aria-label={`Marks for question ${q.number}`}
+                      autoFocus={rowIndex === 0 && questionIndex === 0}
+                    />
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="qiq-exam-rows">
-        {exam.questions.map((q) => (
+        {completeQuestions.map((q) => (
           <div key={q.id} className={`qiq-exam-row${q.maxMarks === null ? " is-missing" : ""}`}>
             <span className="qiq-exam-num">{q.number}</span>
             <span className="qiq-exam-text" title={q.text}>
               {q.text || <em style={{ color: C.faint }}>no wording read</em>}
             </span>
-            <span className="qiq-exam-type">{q.type.replace(/_/g, " ")}</span>
             <input
               className="qiq-exam-marks"
               type="number"
@@ -2477,11 +2682,11 @@ function ExamPanel({ exam, onMarks, onChoice }) {
         ))}
       </div>
 
-      {exam.warnings.length > 0 && (
+      {exam.warnings.filter((w) => !/no printed marks/i.test(w)).length > 0 && (
         <div className="qiq-exam-warn">
-          {exam.warnings.map((w, i) => (
+          {exam.warnings.filter((w) => !/no printed marks/i.test(w)).map((w, i) => (
             <div key={i} className="qiq-exam-warnrow">
-              <span aria-hidden="true">⚠️</span>
+              <strong>Please review</strong>
               <span>{w}</span>
             </div>
           ))}
@@ -2615,17 +2820,17 @@ function MarkedPaper({
   ).length;
 
   return (
-    <div className="qiq-annot-wrap">
+    <div className="qiq-annot-wrap qiq-marked-layout">
       <div>
         <div className="qiq-subhead">
           <div>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>
+            <div style={{ fontSize: 16, fontWeight: 750 }}>
               {selectedQuestion
                 ? `Q${selectedQuestion.number} on the page`
                 : "The student's paper, marked"}
               {markingInProgress && <span className="qiq-marking-dot" />}
             </div>
-            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+            <div style={{ fontSize: 15, color: C.dim, marginTop: 3 }}>
               {markingInProgress
                 ? `Marking… ${revealed} of ${annotations.length}`
                 : selectedQuestion
@@ -2649,7 +2854,6 @@ function MarkedPaper({
 
         {note && !selectedQuestion && (
           <div className="qiq-geom-note">
-            <span aria-hidden="true">⚠️</span>
             <span>
               {note}{" "}
               <button className="qiq-linkbtn" onClick={onShowText}>
@@ -2666,18 +2870,18 @@ function MarkedPaper({
         {selectedQuestion && (
           <div className="qiq-qcard">
             <div className="qiq-qcard-head">
-              <span className="qiq-qcard-num">Q{selectedQuestion.number}</span>
-              <span className="qiq-qcard-text">{selectedQuestion.questionText || "—"}</span>
+              <span className="qiq-qcard-num">Question {selectedQuestion.number}</span>
               <span className="qiq-qcard-marks">
                 {selectedMark === null || selectedMark === undefined ? "—" : selectedMark}
                 <span style={{ color: C.faint, fontWeight: 600 }}> / {selectedQuestion.maxMarks ?? "—"}</span>
                 {selectedOverridden && (
-                  <span style={{ display: "block", fontSize: 9.5, color: C.blue, fontWeight: 600 }}>
-                    ✎ examiner-set
+                  <span style={{ display: "block", fontSize: 12, color: C.blue, fontWeight: 600 }}>
+                    ✎ set by teacher
                   </span>
                 )}
               </span>
             </div>
+            <div className="qiq-qcard-text">{selectedQuestion.questionText || "Question text unavailable"}</div>
 
             <div className="qiq-qcard-where">
               {(() => {
@@ -2686,14 +2890,13 @@ function MarkedPaper({
                   lowConfidence: LOW_CONFIDENCE,
                 });
                 if (st === ANSWER_STATUS.FAILED)
-                  return <span style={{ color: C.red }}>⛔ This question could not be marked automatically.</span>;
+                  return <span style={{ color: C.red }}>This question still needs a mark.</span>;
                 if (st === ANSWER_STATUS.UNANSWERED)
-                  return <span style={{ color: C.faint }}>○ No answer was found anywhere on the paper.</span>;
+                  return <span style={{ color: C.faint }}>The student did not attempt this question.</span>;
                 if (st === ANSWER_STATUS.NOT_DETECTED)
                   return (
                     <span style={{ color: C.amber }}>
-                      ⚠ The answer could not be located on the page — there is unassigned writing, so it may
-                      simply have been missed.
+                      No answer was matched to this question. Please check the answer sheet.
                     </span>
                   );
                 if (placedRegions.length === 0)
@@ -2735,11 +2938,10 @@ function MarkedPaper({
             {selectedQuestion.answerText && (
               <details className="qiq-qcard-answer" open={placedRegions.length === 0}>
                 <summary>
-                  Answer as read ({selectedQuestion.answerText.length} characters
+                  Student’s answer
                   {Number.isFinite(selectedQuestion.confidence)
-                    ? ` · detection confidence ${selectedQuestion.confidence}%`
+                    ? ` · ${selectedQuestion.confidence}% reading certainty`
                     : ""}
-                  )
                 </summary>
                 <p>{selectedQuestion.answerText}</p>
               </details>
@@ -2870,9 +3072,9 @@ function MarkedPaper({
                           </span>
                           {unsure && (
                             <span
-                              style={{ display: "block", marginTop: 6, color: C.amber, fontSize: 11.5 }}
+                              style={{ display: "block", marginTop: 6, color: C.amber, fontSize: 13.5 }}
                             >
-                              ⚠️ AI is unsure — please verify this mark manually
+                              ⚠ Please check this mark
                             </span>
                           )}
                         </span>
@@ -2934,11 +3136,11 @@ function AnnotatedView({
       <div>
         <div className="qiq-subhead">
           <div>
-            <div style={{ fontSize: 13, fontWeight: 700 }}>
+            <div style={{ fontSize: 15, fontWeight: 700 }}>
               Student's answer, marked
               {markingInProgress && <span className="qiq-marking-dot" />}
             </div>
-            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+            <div style={{ fontSize: 13.5, color: C.faint, marginTop: 2 }}>
               {markingInProgress
                 ? `Marking… ${revealed} of ${annotations.length}`
                 : `${anchoredCount} of ${annotations.length} comments pinned to the text — hover or click a highlight to read the remark`}
@@ -2997,8 +3199,8 @@ function AnnotatedView({
                   )}
                   <span style={{ display: "block", marginTop: 5, color: C.text }}>{seg.ann.comment}</span>
                   {unsure && (
-                    <span style={{ display: "block", marginTop: 6, color: C.amber, fontSize: 11.5 }}>
-                      ⚠️ AI is unsure — please verify this mark manually
+                    <span style={{ display: "block", marginTop: 6, color: C.amber, fontSize: 13.5 }}>
+                      ⚠ Please check this mark
                     </span>
                   )}
                 </span>
@@ -3032,7 +3234,7 @@ function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinne
     <div className="qiq-margin">
       <div
         style={{
-          fontSize: 11,
+          fontSize: 13,
           fontWeight: 700,
           letterSpacing: 0.7,
           textTransform: "uppercase",
@@ -3050,7 +3252,7 @@ function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinne
       </div>
 
       {visible.length === 0 && (
-        <div style={{ fontSize: 12.5, color: C.faint }}>
+        <div style={{ fontSize: 14, color: C.faint }}>
           {filterQuestionId ? "No inline comments for this question." : "No inline comments were returned."}
         </div>
       )}
@@ -3080,7 +3282,7 @@ function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinne
               </span>
               <span
                 style={{
-                  fontSize: 11,
+                  fontSize: 13,
                   fontWeight: 700,
                   color: s.color,
                   textTransform: "uppercase",
@@ -3098,17 +3300,17 @@ function MarginNotes({ annotations, revealed, activeAnn, setActiveAnn, isUnpinne
               </span>
             </div>
             {unpinned && ann.text && (
-              <div style={{ fontSize: 11.5, color: C.faint, fontStyle: "italic", marginBottom: 4 }}>
+              <div style={{ fontSize: 13.5, color: C.faint, fontStyle: "italic", marginBottom: 4 }}>
                 “{String(ann.text).slice(0, 90)}
                 {String(ann.text).length > 90 ? "…" : ""}”
               </div>
             )}
-            <div className="qiq-handwrite" style={{ fontSize: 14, lineHeight: 1.55, color: C.text }}>
+            <div className="qiq-handwrite" style={{ fontSize: 16, lineHeight: 1.55, color: C.text }}>
               {ann.comment}
             </div>
             {unsure && (
-              <div style={{ marginTop: 6, fontSize: 11, color: C.amber, lineHeight: 1.5 }}>
-                AI is unsure — please verify this mark manually
+              <div style={{ marginTop: 6, fontSize: 13, color: C.amber, lineHeight: 1.5 }}>
+                Please check this mark
               </div>
             )}
           </div>
@@ -3172,10 +3374,12 @@ function ReviewPanel({
   keyPoints,
   markOverrides,
   onOverride,
+  markNotice,
   awarded,
   total,
   grade,
   hasPages,
+  hasReference,
   geometryByPage = {},
   onViewOnPage,
   onRetryEval,
@@ -3192,10 +3396,10 @@ function ReviewPanel({
      the examiner must look at, not a zero. */
   const statusOf = (k) => {
     const s = answerStatus(k, { hasUnassignedWriting, lowConfidence: LOW_CONFIDENCE });
-    if (s === ANSWER_STATUS.FAILED) return { label: "Evaluation unavailable", color: C.red };
-    if (s === ANSWER_STATUS.NOT_DETECTED) return { label: "Answer not detected", color: C.amber };
-    if (s === ANSWER_STATUS.UNANSWERED) return { label: "Confirmed unanswered", color: C.faint };
-    if (s === ANSWER_STATUS.UNCERTAIN) return { label: "Uncertain — verify", color: C.amber };
+    if (s === ANSWER_STATUS.FAILED) return { label: "Marking incomplete", color: C.red };
+    if (s === ANSWER_STATUS.NOT_DETECTED) return { label: "Check answer sheet", color: C.amber };
+    if (s === ANSWER_STATUS.UNANSWERED) return { label: "Question not attempted", color: C.faint };
+    if (s === ANSWER_STATUS.UNCERTAIN) return { label: "Needs review", color: C.amber };
     if (k.marksTotal > 0 && k.marksAwarded >= k.marksTotal) return { label: "Full marks", color: C.green };
     if (k.marksAwarded > 0) return { label: "Partial", color: C.amber };
     return { label: "Zero", color: C.red };
@@ -3227,93 +3431,58 @@ function ReviewPanel({
 
   return (
     <div className="qiq-rev">
-      {/* --------------------------------------------------- answer coverage */}
+      {/* ----------------------------------------------------- review summary */}
       {keyPoints.length > 0 && (
         <div className="qiq-rev-coverage">
-          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.7, textTransform: "uppercase", color: C.dim }}>
-            Answer coverage — {keyPoints.length} question{keyPoints.length === 1 ? "" : "s"}
+          <div className="qiq-rev-summary-main">
+            <strong>Review summary</strong>
+            {markNotice && <span className="qiq-mark-saved">{markNotice}</span>}
             {notCounted.length > 0 && (
-              <span style={{ color: C.blue, fontWeight: 600 }}>
-                {" "}· {required.length} counted, {notCounted.length} not required
+              <span>{required.length} counted · {notCounted.length} not required</span>
+            )}
+          </div>
+          <div className="qiq-rev-summary-counts">
+            <span><strong>{coverage.detected}</strong> answers found</span>
+            {coverage.unanswered > 0 && (
+              <span><strong>{coverage.unanswered}</strong> not attempted</span>
+            )}
+            {(coverage.uncertain + coverage.notDetected + coverage.failed) > 0 && (
+              <span className="needs-check">
+                <strong>{coverage.uncertain + coverage.notDetected + coverage.failed}</strong> need checking
               </span>
             )}
           </div>
-          <div style={{ fontSize: 12.5, color: C.text, lineHeight: 1.7, marginTop: 6 }}>
-            <span style={{ color: C.green }}>✓ {coverage.detected} detected</span>
-            {coverage.uncertain > 0 && <span style={{ color: C.amber }}> · ⚠ {coverage.uncertain} uncertain</span>}
-            {coverage.notDetected > 0 && (
-              <span style={{ color: C.amber }}> · ⚠ {coverage.notDetected} not confidently detected</span>
-            )}
-            {coverage.failed > 0 && <span style={{ color: C.red }}> · ⛔ {coverage.failed} evaluation failed</span>}
-            {coverage.unanswered > 0 && (
-              <span style={{ color: C.faint }}> · ○ {coverage.unanswered} confirmed unanswered</span>
-            )}
-          </div>
-          {coverage.notDetected > 0 && (
-            <div style={{ fontSize: 11.5, color: C.faint, marginTop: 4 }}>
-              “Not detected” is a limitation of this system, not a fault of the student — inspect
-              before treating any of them as a zero.
+          {(warnings.length > 0 || attention.length > 0) && (
+            <div className="qiq-rev-summary-action">
+              Check questions listed as not attempted or unclear before finalising.
+              <button className="qiq-rev-link" onClick={onShowRaw}>Check answer text →</button>
             </div>
           )}
         </div>
       )}
 
-      {/* ----------------------------------------- what needs the examiner */}
-      {(warnings.length > 0 || attention.length > 0) && (
-        <div className="qiq-rev-alert">
-          <div style={{ fontWeight: 700, fontSize: 12.5, color: C.amber, marginBottom: 6 }}>
-            Check before finalising — {warnings.length + attention.length} item
-            {warnings.length + attention.length === 1 ? "" : "s"}
-          </div>
-          {warnings.map((w, i) => (
-            <div key={`w${i}`} className="qiq-rev-alertrow">
-              <span aria-hidden="true">⚠️</span>
-              <span>{w}</span>
-            </div>
-          ))}
-          {attention.map(({ k, i }) => (
-            <div key={`a${i}`} className="qiq-rev-alertrow">
-              <span aria-hidden="true">{statusKey(k) === ANSWER_STATUS.FAILED ? "⛔" : "⚠️"}</span>
-              <span>
-                <button className="qiq-rev-link" onClick={() => jump(i)}>
-                  {k.questionNumber ? `Q${k.questionNumber}` : `Point ${i + 1}`}
-                </button>{" "}
-                —{" "}
-                {statusKey(k) === ANSWER_STATUS.FAILED
-                  ? "the AI evaluator did not return a valid evaluation. Enter the mark yourself or retry."
-                  : statusKey(k) === ANSWER_STATUS.NOT_DETECTED
-                  ? "no answer could be confidently linked to this question. This does NOT prove it was unanswered — inspect the writing."
-                  : `the AI is unsure of its mark (confidence ${k.confidence}%).`}
-              </span>
-            </div>
-          ))}
-          <div style={{ marginTop: 8 }}>
-            <button className="qiq-rev-link" onClick={onShowRaw}>
-              Open the raw OCR text to verify what was read →
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* --------------------------------------------------- question index */}
       {keyPoints.length > 1 && (
-        <div className="qiq-rev-index">
-          {keyPoints.map((k, i) => {
-            const s = statusOf(k);
-            return (
-              <button
-                key={i}
-                className="qiq-rev-chip"
-                style={{ borderColor: `${s.color}66`, color: s.color }}
-                title={`${k.questionNumber ? "Q" + k.questionNumber : "Point " + (i + 1)} — ${s.label}, ${
-                  k.marksAwarded ?? 0
-                }/${k.marksTotal ?? "—"}`}
-                onClick={() => jump(i)}
-              >
-                {k.questionNumber || i + 1}
-              </button>
-            );
-          })}
+        <div className="qiq-rev-index-wrap">
+          <span className="qiq-rev-index-label">Questions</span>
+          <div className="qiq-rev-index">
+            {keyPoints.map((k, i) => {
+              const s = statusOf(k);
+              return (
+                <button
+                  key={i}
+                  className="qiq-rev-chip"
+                  style={{ borderColor: `${s.color}88`, color: s.color }}
+                  title={`${k.questionNumber ? "Question " + k.questionNumber : "Point " + (i + 1)} — ${s.label}, ${
+                    k.marksAwarded ?? 0
+                  }/${k.marksTotal ?? "—"}`}
+                  onClick={() => jump(i)}
+                >
+                  {k.questionNumber || i + 1}
+                </button>
+              );
+            })}
+          </div>
         </div>
       )}
 
@@ -3335,15 +3504,6 @@ function ReviewPanel({
               ? `pages ${k.pageStart}–${k.pageEnd}`
               : `page ${k.pageStart}`
             : null;
-        const geomWorst = Number.isFinite(k.pageStart)
-          ? Array.from(
-              { length: (k.pageEnd || k.pageStart) - k.pageStart + 1 },
-              (_, j) => geometryByPage[k.pageStart + j] || "none"
-            ).reduce(
-              (worst, v) => ({ high: 3, medium: 2, low: 1, none: 0 })[v] < ({ high: 3, medium: 2, low: 1, none: 0 })[worst] ? v : worst,
-              "high"
-            )
-          : null;
         const canShowOnPage = hasPages && k.questionId && pageRange && st !== ANSWER_STATUS.NOT_DETECTED && st !== ANSWER_STATUS.UNANSWERED;
 
         return (
@@ -3384,6 +3544,7 @@ function ReviewPanel({
               )}
 
               <span className="qiq-rev-markbox">
+                <span className="qiq-rev-marklabel">Final mark</span>
                 {/* A failed evaluation is "no mark yet", never a zero. The box
                     stays empty until the examiner enters one. */}
                 <input
@@ -3410,87 +3571,76 @@ function ReviewPanel({
                   }}
                   aria-label={`Final mark for ${k.questionNumber ? "question " + k.questionNumber : "point " + (i + 1)}`}
                 />
-                <span style={{ color: C.faint, fontSize: 12 }}>/ {k.marksTotal ?? "—"}</span>
+                <span style={{ color: C.faint, fontSize: 14 }}>/ {k.marksTotal ?? "—"}</span>
               </span>
             </div>
 
-            {/* The three independent facts, separated: seeing the answer,
-                judging it, and pointing at it are different operations and
-                fail independently. */}
-            {k.questionId && (
+            {q.answerText && (
+              <details className="qiq-rev-answer qiq-rev-answer-first" open>
+                <summary><span className="qiq-answer-icon" aria-hidden="true">“</span>Student’s answer</summary>
+                <p>{q.answerText}</p>
+              </details>
+            )}
+
+            {/* Explain the mark after the teacher has seen the student's answer. */}
+            {(st === ANSWER_STATUS.UNANSWERED || st === ANSWER_STATUS.NOT_DETECTED || k.rationale || q.rationale) && (
+              <p className="qiq-rev-rationale">
+                <span className="qiq-rev-rationale-label">Why this mark</span>
+                {st === ANSWER_STATUS.UNANSWERED
+                  ? `Question not attempted.${hasReference ? "" : " No reference material was provided."}`
+                  : st === ANSWER_STATUS.NOT_DETECTED
+                  ? `No answer was matched to this question. Please check the answer sheet before awarding zero marks.${hasReference ? "" : " No reference material was provided."}`
+                  : k.rationale || q.rationale}
+              </p>
+            )}
+
+            {/* Keep exceptional notes after the reason so every card starts consistently. */}
+            {k.questionId && (st === ANSWER_STATUS.UNCERTAIN || st === ANSWER_STATUS.FAILED) && (
               <div className="qiq-rev-statusline">
-                {st === ANSWER_STATUS.DETECTED ? (
-                  <span style={{ color: C.green }}>✓ Answer detected{pageRange ? ` (${pageRange})` : ""}</span>
-                ) : st === ANSWER_STATUS.UNCERTAIN ? (
-                  <span style={{ color: C.amber }}>⚠ Answer detected with low confidence{pageRange ? ` (${pageRange})` : ""}</span>
-                ) : st === ANSWER_STATUS.NOT_DETECTED ? (
-                  <span style={{ color: C.amber }}>
-                    ⚠ Answer not confidently detected — this does NOT mean the question was unanswered
-                  </span>
-                ) : st === ANSWER_STATUS.UNANSWERED ? (
-                  <span style={{ color: C.faint }}>○ Confirmed unanswered — no matching or unassigned writing</span>
+                {st === ANSWER_STATUS.UNCERTAIN ? (
+                  <span>Answer may need checking{pageRange ? ` (${pageRange})` : ""}</span>
                 ) : null}
-                {st !== ANSWER_STATUS.FAILED && st !== ANSWER_STATUS.UNANSWERED && st !== ANSWER_STATUS.NOT_DETECTED && (
-                  <span style={{ color: C.green }}>
-                    ✓ Evaluated — {overridden ? markOverrides[i] : k.marksAwarded ?? 0}/{k.marksTotal}
-                  </span>
-                )}
                 {st === ANSWER_STATUS.FAILED && (
-                  <span style={{ color: C.red }}>⛔ Evaluation unavailable — no valid AI result</span>
-                )}
-                {st !== ANSWER_STATUS.UNANSWERED && st !== ANSWER_STATUS.NOT_DETECTED && geomWorst && geomWorst !== "high" && (
-                  <span style={{ color: geomWorst === "medium" ? C.amber : C.red }}>
-                    {geomWorst === "medium"
-                      ? "~ Annotation placement approximate"
-                      : "⚠ Handwriting position not mappable — marks are in the margin, not on the page"}
-                  </span>
+                  <span>Marking incomplete. Enter a mark or try again.</span>
                 )}
               </div>
             )}
 
             {overridden && (
-              <div style={{ fontSize: 11, color: C.blue, marginTop: 4 }}>
-                ✎ Examiner set {markOverrides[i]} —{" "}
-                {st === ANSWER_STATUS.FAILED ? "the AI proposal was unavailable." : `the AI proposed ${aiMark}.`}
-                <button className="qiq-rev-link" style={{ marginLeft: 6 }} onClick={() => onOverride(i, null)}>
-                  {st === ANSWER_STATUS.FAILED ? "clear" : "revert to AI mark"}
+              <div className="qiq-rev-changed">
+                Mark changed to {markOverrides[i]} —{" "}
+                {st === ANSWER_STATUS.FAILED ? "no original mark was available." : `the original suggestion was ${aiMark}.`}
+                <button className="qiq-rev-link" onClick={() => onOverride(i, null)}>
+                  {st === ANSWER_STATUS.FAILED ? "Clear" : "Restore suggested mark"}
                 </button>
               </div>
             )}
 
-            {/* Why the machine proposed this mark — the whole point of the tab. */}
-            {(k.rationale || q.rationale) && (
-              <p className="qiq-rev-rationale">
-                <span style={{ fontWeight: 700, color: C.dim }}>Why this mark: </span>
-                {k.rationale || q.rationale}
-              </p>
-            )}
-
-            {(k.correctPoints?.length || k.missingPoints?.length || k.incorrectPoints?.length) && (
+            {st !== ANSWER_STATUS.UNANSWERED && st !== ANSWER_STATUS.NOT_DETECTED && Boolean(k.correctPoints?.length || k.missingPoints?.length || k.incorrectPoints?.length) && (
               <div className="qiq-rev-lists">
                 {k.correctPoints?.length > 0 && (
                   <ul className="qiq-rev-list">
-                    {k.correctPoints.map((p, j) => (
+                    {k.correctPoints.filter((p) => typeof p === "string" && p.trim()).map((p, j) => (
                       <li key={`c${j}`} style={{ color: C.green }}>
-                        ✓ <span style={{ color: C.text }}>{p}</span>
+                        <span style={{ color: C.text }}>{p}</span>
                       </li>
                     ))}
                   </ul>
                 )}
                 {k.incorrectPoints?.length > 0 && (
                   <ul className="qiq-rev-list">
-                    {k.incorrectPoints.map((p, j) => (
+                    {k.incorrectPoints.filter((p) => typeof p === "string" && p.trim()).map((p, j) => (
                       <li key={`e${j}`} style={{ color: C.red }}>
-                        ✗ <span style={{ color: C.text }}>{p}</span>
+                        <span style={{ color: C.text }}>{p}</span>
                       </li>
                     ))}
                   </ul>
                 )}
                 {k.missingPoints?.length > 0 && (
                   <ul className="qiq-rev-list">
-                    {k.missingPoints.map((p, j) => (
+                    {k.missingPoints.filter((p) => typeof p === "string" && p.trim()).map((p, j) => (
                       <li key={`m${j}`} style={{ color: "#A855F7" }}>
-                        ! <span style={{ color: C.text }}>{p}</span>
+                        <span style={{ color: C.text }}>{p}</span>
                       </li>
                     ))}
                   </ul>
@@ -3498,48 +3648,43 @@ function ReviewPanel({
               </div>
             )}
 
-            {q.answerText && (
-              <details className="qiq-rev-answer">
-                <summary>Student's answer as read ({q.answerText.length} chars)</summary>
-                <p>{q.answerText}</p>
-              </details>
-            )}
-
+            {st !== ANSWER_STATUS.UNANSWERED && (
             <div className="qiq-rev-foot">
-              {k.grounding && <GroundingBadge grounding={k.grounding} />}
-              {Number.isFinite(k.confidence) && st !== ANSWER_STATUS.FAILED && (
-                <span style={{ fontSize: 10.5, color: isLowConfidence(k) ? C.amber : C.faint }}>
-                  AI confidence {k.confidence}%
+              {!hasReference && (st === ANSWER_STATUS.DETECTED || st === ANSWER_STATUS.UNCERTAIN) ? (
+                <span className="qiq-reference-note">
+                  Answer found. No reference material was provided, so this mark was based on subject knowledge.
+                </span>
+              ) : k.grounding && st !== ANSWER_STATUS.NOT_DETECTED ? (
+                <GroundingBadge grounding={k.grounding} hasReference={hasReference} />
+              ) : null}
+              {Number.isFinite(k.confidence) && isLowConfidence(k) && st !== ANSWER_STATUS.FAILED && st !== ANSWER_STATUS.UNANSWERED && st !== ANSWER_STATUS.NOT_DETECTED && (
+                <span style={{ fontSize: 12.5, color: isLowConfidence(k) ? C.amber : C.faint }}>
+                  Please check this reading
                 </span>
               )}
               {st === ANSWER_STATUS.FAILED && (
                 <button className="qiq-rev-link" onClick={onRetryEval}>
-                  ↻ Retry evaluation
+                  Try marking again
                 </button>
               )}
               {(st === ANSWER_STATUS.NOT_DETECTED || st === ANSWER_STATUS.UNCERTAIN) && (
                 <button className="qiq-rev-link" onClick={onShowRaw}>
-                  Inspect possible writing →
+                  Check possible writing
                 </button>
               )}
               {canShowOnPage ? (
                 <button className="qiq-rev-link" onClick={() => onViewOnPage(k)}>
-                  View answer on page →
+                  View on answer sheet
                 </button>
-              ) : (
-                k.questionId &&
-                hasPages &&
-                st !== ANSWER_STATUS.FAILED && (
-                  <span style={{ fontSize: 10.5, color: C.faint }}>No page location available.</span>
-                )
-              )}
+              ) : null}
             </div>
+            )}
           </div>
         );
       })}
 
       {keyPoints.length === 0 && (
-        <p style={{ color: C.faint, fontSize: 12.5 }}>
+        <p style={{ color: C.faint, fontSize: 14 }}>
           No per-question breakdown was produced for this paper — see the Report Card tab.
         </p>
       )}
@@ -3547,18 +3692,18 @@ function ReviewPanel({
       {/* --------------------------------------------------- examiner total */}
       {keyPoints.length > 0 && (
         <div className="qiq-rev-total">
-          <span style={{ color: C.dim, fontSize: 12.5 }}>Examiner's total</span>
+          <span style={{ color: C.dim, fontSize: 14 }}>Examiner's total</span>
           <span style={{ fontWeight: 800, fontSize: 18, color: gradeColor(grade) }}>
             {awarded} / {total}
           </span>
-          <span style={{ fontSize: 12, color: C.faint }}>
+          <span style={{ fontSize: 14, color: C.faint }}>
             grade {grade}
             {notCounted.length > 0 &&
               ` · out of the ${required.length} question${required.length === 1 ? "" : "s"} this paper required`}
             {Object.keys(markOverrides).length > 0 &&
               ` · ${Object.keys(markOverrides).length} mark(s) adjusted by you`}
             {coverage.failed > 0 &&
-              ` · ${coverage.failed} question${coverage.failed === 1 ? "" : "s"} not yet evaluated (counted as 0 above until you set a mark)`}
+              ` · ${coverage.failed} question${coverage.failed === 1 ? "" : "s"} still need a mark (counted as 0 above until you enter one)`}
           </span>
         </div>
       )}
@@ -3582,6 +3727,9 @@ function ReportCard({
   setSubject,
   reportDate,
   setReportDate,
+  hasReference,
+  studentDetails,
+  setStudentDetails,
 }) {
   const g = gradeColor(grade || evaluation.grade);
   const positives = Array.isArray(evaluation.thingsWellDone) ? evaluation.thingsWellDone : [];
@@ -3617,10 +3765,10 @@ function ReportCard({
     /* Marked, printed, and not part of the score. The paper let the student
        choose, and this answer was not among the ones that count. */
     if (!counted) return { label: "Not counted", color: C.blue };
-    if (pendingRow) return { label: "Eval. unavailable", color: C.red };
-    if (st === ANSWER_STATUS.NOT_DETECTED) return { label: "Answer not detected", color: C.amber };
-    if (st === ANSWER_STATUS.UNANSWERED) return { label: "Unanswered", color: C.faint };
-    if (st === ANSWER_STATUS.UNCERTAIN) return { label: "Verify", color: C.amber };
+    if (pendingRow) return { label: "Mark needed", color: C.red };
+    if (st === ANSWER_STATUS.NOT_DETECTED) return { label: "Check answer sheet", color: C.amber };
+    if (st === ANSWER_STATUS.UNANSWERED) return { label: "Not attempted", color: C.faint };
+    if (st === ANSWER_STATUS.UNCERTAIN) return { label: "Needs review", color: C.amber };
     if (k.quality === "well" || (k.covered && !k.quality)) return { label: "Covered well", color: C.green };
     if (k.quality === "partially") return { label: "Partial", color: C.amber };
     return { label: "Not covered", color: C.red };
@@ -3630,9 +3778,9 @@ function ReportCard({
     <div>
       <div className="qiq-report-actions qiq-noprint">
         <button className="qiq-btn qiq-btn-sm" onClick={() => window.print()}>
-          🖨️ Print Report
+          Print report
         </button>
-        <span style={{ fontSize: 11.5, color: C.faint }}>
+        <span style={{ fontSize: 13.5, color: C.faint }}>
           Prints black-on-white — the dark theme and all controls are stripped out.
         </span>
       </div>
@@ -3644,7 +3792,7 @@ function ReportCard({
             <div className="qiq-report-logo">Q</div>
             <div>
               <div className="qiq-report-title">Assessment Report</div>
-              <div className="qiq-report-sub">QIQ · AI-assisted descriptive evaluation</div>
+              <div className="qiq-report-sub">QIQ · Teacher-reviewed descriptive assessment</div>
             </div>
           </div>
           <div className="qiq-report-serial">
@@ -3681,6 +3829,37 @@ function ReportCard({
               placeholder="—"
             />
           </label>
+          {studentDetails.map((row) => (
+            <label className="qiq-rfield" key={row.id}>
+              <input
+                className="qiq-rlabel-input qiq-noprint"
+                value={row.label}
+                onChange={(e) =>
+                  setStudentDetails((rows) =>
+                    rows.map((item) => item.id === row.id ? { ...item, label: e.target.value } : item)
+                  )
+                }
+                placeholder="Detail name"
+                aria-label="Report detail name"
+              />
+              <span className="qiq-print-only">{row.label || "Additional detail"}</span>
+              <input
+                className="qiq-rinput"
+                value={row.value}
+                onChange={(e) =>
+                  setStudentDetails((rows) =>
+                    rows.map((item) => item.id === row.id ? { ...item, value: e.target.value } : item)
+                  )
+                }
+                placeholder="—"
+              />
+            </label>
+          ))}
+        </div>
+
+        <div className="qiq-report-ready qiq-noprint">
+          <strong>Ready for teacher review</strong>
+          <span>Check the final marks and student details before printing or sharing.</span>
         </div>
 
         {/* ------------------------------------------------- score + stamp */}
@@ -3699,7 +3878,7 @@ function ReportCard({
             key={`p${runKey}`}
             title={
               verdict === "pending"
-                ? `Pass mark is ${Math.round(PASS_THRESHOLD * 100)}%. ${pending} mark(s) are still unevaluated — enough to change this verdict.`
+                ? `Pass mark is ${Math.round(PASS_THRESHOLD * 100)}%. ${pending} mark(s) have not been entered yet and could change this result.`
                 : `Pass mark is ${Math.round(PASS_THRESHOLD * 100)}%`
             }
           >
@@ -3741,29 +3920,39 @@ function ReportCard({
                         </strong>
                         <span style={{ color: C.faint }}> / {k.marksTotal ?? "—"}</span>
                         {!row.counted && (
-                          <div style={{ fontSize: 9.5, color: C.blue, whiteSpace: "nowrap" }}>
+                          <div style={{ fontSize: 12, color: C.blue, whiteSpace: "nowrap" }}>
                             not in the total
                           </div>
                         )}
                         {k.overridden && (
                           <div
-                            style={{ fontSize: 9.5, color: C.blue, whiteSpace: "nowrap" }}
-                            title={`The AI proposed ${k.aiMarks ?? 0}; the examiner set ${k.marksAwarded}.`}
+                            style={{ fontSize: 12, color: C.blue, whiteSpace: "nowrap" }}
+                            title={`The suggested mark was ${k.aiMarks ?? 0}; the teacher set ${k.marksAwarded}.`}
                           >
-                            ✎ examiner-set
+                            ✎ set by teacher
                           </div>
                         )}
                       </td>
                       <td style={{ color: C.dim, lineHeight: 1.55 }}>
-                        {k.teacherNote}
+                        {row.st === ANSWER_STATUS.UNANSWERED
+                          ? `Question not attempted.${hasReference ? "" : " No reference material was provided."}`
+                          : row.st === ANSWER_STATUS.NOT_DETECTED
+                          ? `No answer was matched to this question. Please check the answer sheet.${hasReference ? "" : " No reference material was provided."}`
+                          : k.teacherNote}
                         {/* Where the judgement came from. Present only for the
                             question-paper pipeline; the older flow has no
                             reference material to attribute to. */}
-                        {k.grounding && (
+                        {row.st !== ANSWER_STATUS.UNANSWERED && row.st !== ANSWER_STATUS.NOT_DETECTED && (
                           <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                            <GroundingBadge grounding={k.grounding} />
+                            {!hasReference && (row.st === ANSWER_STATUS.DETECTED || row.st === ANSWER_STATUS.UNCERTAIN) ? (
+                              <span className="qiq-reference-note">
+                                Answer found. No reference material was provided, so this mark was based on subject knowledge.
+                              </span>
+                            ) : k.grounding ? (
+                              <GroundingBadge grounding={k.grounding} hasReference={hasReference} />
+                            ) : null}
                             {k.evidence && k.evidence.length > 0 && (
-                              <span style={{ fontSize: 10.5, color: C.faint }}>
+                              <span style={{ fontSize: 12.5, color: C.faint }}>
                                 {[...new Set(k.evidence.map((e) => e.source).filter(Boolean))].join(", ")}
                               </span>
                             )}
@@ -3779,7 +3968,7 @@ function ReportCard({
                 {keyPoints.length === 0 && (
                   <tr>
                     <td colSpan={4} style={{ color: C.faint }}>
-                      No key-point breakdown returned.
+                      No mark-by-mark details are available.
                     </td>
                   </tr>
                 )}
@@ -3789,9 +3978,9 @@ function ReportCard({
                   <td colSpan={2} style={{ fontWeight: 700 }}>
                     Total
                     {pending > 0 && (
-                      <div style={{ fontSize: 10, fontWeight: 500, color: C.red }}>
+                      <div style={{ fontSize: 12, fontWeight: 500, color: C.red }}>
                         {pending} mark{pending === 1 ? "" : "s"} across {unevaluated.length} question
-                        {unevaluated.length === 1 ? "" : "s"} are still unevaluated and count as 0 here
+                        {unevaluated.length === 1 ? "" : "s"} still need to be entered and count as 0 here
                       </div>
                     )}
                   </td>
@@ -3851,14 +4040,13 @@ function ReportCard({
         {/* --------------------------------------- positives / improvements */}
         <div className="qiq-two-col">
           <div className="qiq-listcard" style={{ borderTop: `2px solid ${C.green}` }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.green, marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.green, marginBottom: 10 }}>
               What was done well
             </div>
-            {positives.length === 0 && <div style={{ fontSize: 12.5, color: C.faint }}>No positives recorded.</div>}
+            {positives.length === 0 && <div style={{ fontSize: 14, color: C.faint }}>No positives recorded.</div>}
             <ul className="qiq-list">
               {positives.map((t, i) => (
                 <li key={i}>
-                  <span style={{ color: C.green, fontWeight: 700, flexShrink: 0 }}>✓</span>
                   <span>{t}</span>
                 </li>
               ))}
@@ -3866,16 +4054,15 @@ function ReportCard({
           </div>
 
           <div className="qiq-listcard" style={{ borderTop: `2px solid ${C.amber}` }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, color: C.amber, marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, color: C.amber, marginBottom: 10 }}>
               Areas to improve
             </div>
             {improvements.length === 0 && (
-              <div style={{ fontSize: 12.5, color: C.faint }}>No improvement areas recorded.</div>
+              <div style={{ fontSize: 14, color: C.faint }}>No improvement areas recorded.</div>
             )}
             <ul className="qiq-list">
               {improvements.map((t, i) => (
                 <li key={i}>
-                  <span style={{ color: C.amber, fontWeight: 700, flexShrink: 0 }}>↗</span>
                   <span>
                     {t}{" "}
                     <a
@@ -3884,7 +4071,7 @@ function ReportCard({
                       target="_blank"
                       rel="noopener noreferrer"
                     >
-                      Study →
+                      Study this topic
                     </a>
                   </span>
                 </li>
@@ -3894,17 +4081,16 @@ function ReportCard({
         </div>
 
         <div className="qiq-report-foot">
-          Generated by QIQ using {EVAL_MODEL} · Marks flagged ⚠️ were low-confidence and should be
-          verified by the teacher before this report is issued.
+          Prepared with QIQ · Please review any mark labelled “Needs review” before sharing this report.
           {notCounted.length > 0 &&
             ` · This paper let the student choose: ${rows.length - notCounted.length} of ${rows.length} ` +
               `question(s) count, and the total is out of those. The rest are marked for the record.`}
           {unevaluated.length > 0 &&
-            ` · ${unevaluated.length} question(s) could not be evaluated automatically — the ${pending} mark(s) they carry are pending, not zero.`}
+            ` · ${unevaluated.length} question(s) still need teacher marking — their ${pending} mark(s) are pending, not zero.`}
           {verdict === "pending" &&
             " · The pass/fail verdict is withheld until those marks are entered: the paper can still pass."}
           {overrideCount > 0 &&
-            ` · ${overrideCount} mark${overrideCount === 1 ? "" : "s"} on this report were set by the examiner, overriding the AI proposal.`}
+            ` · ${overrideCount} mark${overrideCount === 1 ? "" : "s"} on this report were set by the teacher instead of using the original suggestion.`}
         </div>
       </div>
     </div>
@@ -3913,11 +4099,9 @@ function ReportCard({
 
 /* -------------------------------------------------------------- Tab 3: raw -- */
 
-function RawView({ pageTexts, setPageTexts, geometryByPage = {}, dirty, onReEvaluate, rawResponse, reasoning }) {
-  const [panel, setPanel] = useState("");
+function RawView({ pageTexts, setPageTexts, geometryByPage = {}, dirty, onReEvaluate }) {
   const text = pageTexts.join("\n\n");
   const words = text.trim() ? text.trim().split(/\s+/).length : 0;
-  const toggle = (id) => setPanel((p) => (p === id ? "" : id));
 
   /* One box per page, not one box for the paper. The page a line sits on is what
      its ink measurement is attached to, and a single merged box gave the user no
@@ -3929,16 +4113,16 @@ function RawView({ pageTexts, setPageTexts, geometryByPage = {}, dirty, onReEval
     <div style={{ display: "grid", gap: 12 }}>
       <div className="qiq-subhead">
         <div>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>Extracted text</div>
-          <div style={{ fontSize: 11.5, color: C.faint, marginTop: 2 }}>
+          <div style={{ fontSize: 15, fontWeight: 700 }}>Answer text read from the paper</div>
+          <div style={{ fontSize: 13.5, color: C.faint, marginTop: 2 }}>
             {words} words · {text.length} characters
             {pageTexts.length > 1 ? ` · ${pageTexts.length} pages, edited separately` : ""} · fix any
-            misread handwriting and re-grade
+            unclear or misread words before marking again
           </div>
         </div>
         {dirty && (
           <button className="qiq-btn qiq-btn-sm" onClick={onReEvaluate}>
-            Re-grade corrected text
+            Mark corrected text again
           </button>
         )}
       </div>
@@ -3976,19 +4160,6 @@ function RawView({ pageTexts, setPageTexts, geometryByPage = {}, dirty, onReEval
         })
       )}
 
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-        <button className="qiq-link" onClick={() => toggle("raw")}>
-          {panel === "raw" ? "Hide" : "Show"} raw evaluator response
-        </button>
-        {reasoning && (
-          <button className="qiq-link" onClick={() => toggle("reasoning")}>
-            {panel === "reasoning" ? "Hide" : "Show"} examiner's reasoning trace
-          </button>
-        )}
-      </div>
-
-      {panel === "raw" && <pre className="qiq-pre">{rawResponse}</pre>}
-      {panel === "reasoning" && <pre className="qiq-pre">{reasoning}</pre>}
     </div>
   );
 }
@@ -4005,6 +4176,7 @@ const CSS = `
   font-family: ui-sans-serif, -apple-system, "Segoe UI", Inter, Roboto, system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   padding: 20px;
+  font-size: 16px;
 }
 .qiq-root *, .qiq-root *::before, .qiq-root *::after { box-sizing: border-box; }
 
@@ -4014,6 +4186,8 @@ const CSS = `
   border:1px solid ${C.border}; border-radius:16px; padding:14px 18px; margin-bottom:16px;
   backdrop-filter: blur(8px);
 }
+.qiq-brand-title { font-size:19px; font-weight:750; letter-spacing:-.25px; }
+.qiq-brand-subtitle { font-size:15px; color:${C.dim}; margin-top:3px; line-height:1.4; }
 .qiq-logo {
   width:38px; height:38px; border-radius:11px; display:grid; place-items:center;
   background: linear-gradient(135deg, ${C.blue}, ${C.purple});
@@ -4024,7 +4198,7 @@ const CSS = `
 .qiq-pipe-item { display:flex; align-items:center; gap:8px; }
 .qiq-pipe-dot {
   width:24px; height:24px; border-radius:50%; display:grid; place-items:center;
-  font-size:11px; font-weight:700; background:#0B1220; color:${C.faint};
+  font-size:13px; font-weight:700; background:#0B1220; color:${C.faint};
   border:1px solid ${C.border}; transition:.3s;
 }
 .qiq-pipe-dot.is-done { background:${C.blue}; border-color:${C.blue}; color:#fff; }
@@ -4035,24 +4209,38 @@ const CSS = `
 .qiq-pipe-line { width:34px; height:2px; margin:0 10px; border-radius:2px; transition:.4s; }
 @keyframes qiq-pulse { 0%,100%{box-shadow:0 0 0 4px rgba(37,99,235,.18)} 50%{box-shadow:0 0 0 8px rgba(37,99,235,.06)} }
 
-.qiq-grid { display:grid; grid-template-columns: 380px minmax(0,1fr); gap:16px; align-items:start; }
+.qiq-grid { display:grid; grid-template-columns: minmax(420px, 470px) minmax(0,1fr); gap:18px; align-items:start; }
 @media (max-width: 1080px) { .qiq-grid { grid-template-columns: 1fr; } }
+@media (max-width: 640px) {
+  .qiq-root { padding:10px; }
+  .qiq-header { padding:13px; }
+  .qiq-grid > aside.qiq-panel { padding:16px; }
+  .qiq-panel { border-radius:13px; }
+  .qiq-brand-title { font-size:16px; }
+  .qiq-brand-subtitle { font-size:14px; }
+  .qiq-pipeline { width:100%; justify-content:space-between; }
+  .qiq-pipe-line { width:14px; margin:0 5px; }
+  .qiq-pipe-item span { font-size:13px !important; }
+  .qiq-empty { padding:36px 8px; }
+  .qiq-empty-title { font-size:21px; }
+}
 .qiq-panel {
   background: ${C.card}; border:1px solid ${C.border}; border-radius:16px; padding:18px;
   box-shadow: 0 12px 40px rgba(0,0,0,.28);
   min-width: 0; /* a grid child must be allowed to shrink, or wide content escapes */
   overflow: hidden;
 }
+.qiq-grid > aside.qiq-panel { padding:22px; }
 .qiq-right { min-height: 560px; display:flex; flex-direction:column; overflow:visible; }
 
 .qiq-step-num {
-  width:20px; height:20px; border-radius:6px; display:grid; place-items:center;
-  background: rgba(37,99,235,.16); color:#93B4FF; font-size:11px; font-weight:800;
+  width:24px; height:24px; border-radius:7px; display:grid; place-items:center;
+  background: rgba(37,99,235,.18); color:#B8CCFF; font-size:14px; font-weight:800;
   border:1px solid rgba(37,99,235,.3);
 }
 .qiq-input {
   width:100%; background:#0B1220; border:1px solid ${C.border}; border-radius:10px;
-  color:${C.text}; padding:11px 12px; font-size:13.5px; font-family:inherit; outline:none;
+  color:${C.text}; padding:13px 14px; font-size:15px; font-family:inherit; outline:none;
   transition: border-color .18s, box-shadow .18s;
 }
 .qiq-input:focus { border-color:${C.blue}; box-shadow:0 0 0 3px rgba(37,99,235,.16); }
@@ -4060,24 +4248,73 @@ const CSS = `
    for text the teacher actually typed. */
 .qiq-input::placeholder { color:#455066; font-style:italic; }
 .qiq-textarea { min-height:150px; resize:vertical; line-height:1.65; }
+.qiq-collapsible {
+  margin-top:20px; border:1px solid ${C.border}; border-radius:12px; background:#0B1220;
+  overflow:hidden;
+}
+.qiq-collapsible-summary {
+  display:flex; align-items:center; gap:10px; padding:13px 14px; cursor:pointer;
+  list-style:none; user-select:none; transition:background .16s;
+}
+.qiq-collapsible-summary::-webkit-details-marker { display:none; }
+.qiq-collapsible-summary:hover { background:rgba(37,99,235,.07); }
+.qiq-collapsible-summary:focus-visible { outline:2px solid ${C.blue}; outline-offset:-2px; }
+.qiq-collapsible-title { color:${C.text}; font-size:15px; font-weight:750; white-space:nowrap; }
+.qiq-collapsible-value {
+  margin-left:auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  color:${C.dim}; font-size:13px;
+}
+.qiq-collapsible-chevron {
+  margin-left:auto; color:#93B4FF; font-size:18px; font-weight:800; transition:transform .18s;
+}
+.qiq-collapsible-value + .qiq-collapsible-chevron { margin-left:4px; }
+.qiq-collapsible[open] .qiq-collapsible-chevron { transform:rotate(180deg); }
+.qiq-collapsible-body {
+  display:grid; gap:9px; padding:0 14px 14px; border-top:1px solid ${C.border}; padding-top:13px;
+}
 
 .qiq-invalid { border-color:${C.red} !important; box-shadow:0 0 0 3px rgba(239,68,68,.14) !important; }
-.qiq-hint { margin-top:6px; font-size:11px; color:${C.faint}; line-height:1.5; }
+.qiq-hint { margin-top:7px; font-size:14px; color:${C.dim}; line-height:1.55; }
+.qiq-optional-note { padding:0 2px; }
 .qiq-mini-btn {
   background: rgba(37,99,235,.14); border:1px solid rgba(37,99,235,.34); color:#93B4FF;
-  font-size:11px; font-weight:700; padding:3px 9px; border-radius:99px; cursor:pointer;
+  font-size:13px; font-weight:700; padding:3px 9px; border-radius:99px; cursor:pointer;
   font-family:inherit; transition:.15s; letter-spacing:.2px; white-space:nowrap;
 }
 .qiq-mini-btn:hover { background: rgba(37,99,235,.26); color:#C7D8FF; }
 
 .qiq-drop {
   display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center;
-  border:1.5px dashed ${C.borderSoft}; border-radius:14px; padding:26px 16px; cursor:pointer;
+  border:1.5px dashed #385071; border-radius:14px; padding:28px 20px; cursor:pointer;
   background: linear-gradient(180deg, rgba(37,99,235,.04), transparent); transition:.2s;
   overflow:hidden; max-width:100%;
 }
 .qiq-drop:hover, .qiq-drop.is-dragging {
   border-color:${C.blue}; background: rgba(37,99,235,.09); transform: translateY(-1px);
+}
+.qiq-upload-icon {
+  width:30px; height:30px; border-radius:9px; display:grid; place-items:center; margin-bottom:9px;
+  color:#DCE8FF; background:rgba(37,99,235,.24); border:1px solid rgba(96,165,250,.45);
+  font-size:15px; font-weight:800;
+}
+.qiq-upload-icon.is-optional { background:rgba(148,163,184,.12); border-color:${C.borderSoft}; color:${C.dim}; }
+.qiq-upload-title { font-size:15px; line-height:1.35; font-weight:750; color:${C.text}; }
+.qiq-upload-title.is-large { font-size:16px; }
+.qiq-upload-body { width:100%; text-align:center; }
+.qiq-upload-copy { max-width:360px; margin-left:auto; margin-right:auto; font-size:15px; color:${C.dim}; line-height:1.55; margin-top:6px; }
+.qiq-upload-action {
+  display:inline-flex; margin-top:12px; padding:7px 13px; border-radius:8px;
+  background:${C.blue}; color:#fff; font-size:14px; font-weight:750;
+}
+.qiq-upload-action.is-secondary { background:rgba(37,99,235,.15); color:#B8CCFF; border:1px solid rgba(96,165,250,.3); }
+.qiq-upload-confirm {
+  display:flex; align-items:flex-start; gap:8px; margin:9px 0; padding:9px 11px;
+  border-radius:9px; background:rgba(34,197,94,.07); border:1px solid rgba(34,197,94,.25);
+  color:#BBF7D0; font-size:14px; line-height:1.45;
+}
+.qiq-upload-confirm > span:first-child {
+  width:18px; height:18px; flex:0 0 18px; display:grid; place-items:center; border-radius:50%;
+  background:rgba(34,197,94,.2); color:#86EFAC; font-size:13px; font-weight:900;
 }
 .qiq-drop-icon {
   width:40px; height:40px; border-radius:12px; display:grid; place-items:center; margin-bottom:10px;
@@ -4104,25 +4341,25 @@ const CSS = `
 .qiq-btn {
   width:100%; margin-top:18px; display:inline-flex; align-items:center; justify-content:center; gap:9px;
   background: linear-gradient(135deg, ${C.blue}, ${C.purple}); color:#fff; border:none;
-  border-radius:11px; padding:13px 16px; font-size:14px; font-weight:700; cursor:pointer;
+  border-radius:11px; padding:15px 16px; font-size:15px; font-weight:750; cursor:pointer;
   font-family:inherit; box-shadow:0 8px 24px rgba(37,99,235,.3); transition:.18s;
 }
 .qiq-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow:0 12px 30px rgba(37,99,235,.42); }
 .qiq-btn:disabled { opacity:.65; cursor:progress; box-shadow:none; }
 .qiq-btn-ghost {
   margin-top:0; background:#0B1220; border:1px solid ${C.border}; color:${C.dim};
-  box-shadow:none; font-weight:600; font-size:12.5px; padding:10px 12px;
+  box-shadow:none; font-weight:600; font-size:14px; padding:10px 12px;
 }
 .qiq-btn-ghost:hover:not(:disabled) { color:${C.text}; border-color:${C.blue}; transform:none; box-shadow:none; }
-.qiq-btn-sm { width:auto; margin-top:0; padding:9px 15px; font-size:12.5px; }
+.qiq-btn-sm { width:auto; margin-top:0; padding:9px 15px; font-size:14px; }
 .qiq-link {
-  background:none; border:none; color:#93B4FF; font-size:12.5px; cursor:pointer;
+  background:none; border:none; color:#93B4FF; font-size:14px; cursor:pointer;
   padding:0; font-family:inherit; text-decoration:underline; text-underline-offset:3px;
 }
 
 .qiq-error {
   margin-top:16px; background: rgba(239,68,68,.1); border:1px solid rgba(239,68,68,.32);
-  color:#FCA5A5; border-radius:10px; padding:11px 13px; font-size:12.5px; line-height:1.6;
+  color:#FCA5A5; border-radius:10px; padding:11px 13px; font-size:14px; line-height:1.6;
   animation: qiq-fade .25s ease;
 }
 @keyframes qiq-fade { from{opacity:0; transform:translateY(-4px)} to{opacity:1; transform:none} }
@@ -4135,13 +4372,40 @@ const CSS = `
 
 .qiq-empty {
   flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center;
-  text-align:center; padding:60px 24px;
+  text-align:center; padding:52px 24px;
 }
 .qiq-empty-icon {
-  width:64px; height:64px; border-radius:18px; display:grid; place-items:center; font-size:27px;
+  width:58px; height:58px; border-radius:18px; display:grid; place-items:center; font-size:24px;
   background: linear-gradient(135deg, rgba(37,99,235,.16), rgba(124,58,237,.16));
   border:1px solid ${C.border}; margin-bottom:18px;
 }
+.qiq-empty-kicker { color:#93B4FF; font-size:14px; font-weight:800; letter-spacing:1.2px; text-transform:uppercase; margin-bottom:10px; }
+.qiq-empty-title { font-size:24px; font-weight:800; color:${C.text}; letter-spacing:-.4px; }
+.qiq-empty-copy { font-size:16px; color:${C.dim}; max-width:540px; line-height:1.7; margin:10px 0 22px; }
+.qiq-setup-list { width:min(100%, 560px); display:grid; gap:10px; text-align:left; }
+.qiq-setup-item {
+  display:flex; align-items:center; gap:13px; padding:13px 15px; border:1px solid ${C.border};
+  border-radius:12px; background:#0B1220; color:${C.text};
+}
+.qiq-setup-item.is-done { border-color:rgba(34,197,94,.32); background:rgba(34,197,94,.055); }
+.qiq-setup-status {
+  width:30px; height:30px; flex:0 0 30px; border-radius:50%; display:grid; place-items:center;
+  border:1px solid ${C.borderSoft}; color:${C.dim}; font-size:14px; font-weight:800;
+}
+.qiq-setup-item.is-done .qiq-setup-status { background:rgba(34,197,94,.18); border-color:rgba(34,197,94,.4); color:#86EFAC; }
+.qiq-setup-item strong { display:block; font-size:16px; }
+.qiq-setup-item small { display:block; color:${C.dim}; font-size:14px; margin-top:3px; line-height:1.4; }
+.qiq-privacy-note { margin-top:18px; color:${C.faint}; font-size:13.5px; }
+.qiq-teacher-review {
+  display:flex; gap:11px; align-items:flex-start; margin-bottom:14px; padding:12px 14px;
+  border-radius:11px; background:rgba(37,99,235,.07); border:1px solid rgba(96,165,250,.26);
+}
+.qiq-teacher-review > span {
+  width:24px; height:24px; flex:0 0 24px; display:grid; place-items:center; border-radius:50%;
+  background:rgba(37,99,235,.2); color:#BFDBFE; font-weight:900;
+}
+.qiq-teacher-review strong { display:block; color:${C.text}; font-size:14px; }
+.qiq-teacher-review small { display:block; color:${C.dim}; font-size:13px; line-height:1.5; margin-top:2px; }
 .qiq-orb {
   width:38px; height:38px; border-radius:50%; flex-shrink:0;
   background: conic-gradient(from 0deg, ${C.blue}, ${C.purple}, ${C.blue});
@@ -4152,20 +4416,20 @@ const CSS = `
 .qiq-rawpage { display:grid; gap:6px; }
 .qiq-rawpage-head {
   display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap;
-  font-size:11px; font-weight:700; color:${C.dim}; letter-spacing:.4px;
+  font-size:13px; font-weight:700; color:${C.dim}; letter-spacing:.4px;
 }
 
 .qiq-cut {
   margin-top:10px; display:grid; gap:6px; background: rgba(245,158,11,.09);
   border:1px solid rgba(245,158,11,.3); border-radius:10px; padding:9px 11px;
-  font-size:11.5px; line-height:1.6; color:#FCD34D;
+  font-size:13.5px; line-height:1.6; color:#FCD34D;
 }
 .qiq-cut strong { color:#FDE68A; }
 
 .qiq-notice {
   margin-top:16px; max-width:440px; background: rgba(245,158,11,.1);
   border:1px solid rgba(245,158,11,.32); color:#FCD34D; border-radius:10px;
-  padding:10px 13px; font-size:12.5px; line-height:1.6; animation: qiq-fade .25s ease;
+  padding:10px 13px; font-size:14px; line-height:1.6; animation: qiq-fade .25s ease;
 }
 
 /* ---------------------------------------------------------- history cards */
@@ -4180,16 +4444,16 @@ const CSS = `
 .qiq-tabs { display:flex; gap:6px; border-bottom:1px solid ${C.border}; padding-bottom:2px; flex-wrap:wrap; }
 .qiq-tab {
   display:inline-flex; align-items:center; gap:8px; background:transparent; border:none;
-  border-bottom:2px solid transparent; color:${C.faint}; font-size:13px; font-weight:600;
+  border-bottom:2px solid transparent; color:${C.faint}; font-size:15px; font-weight:600;
   padding:10px 14px; cursor:pointer; font-family:inherit; transition:.18s; margin-bottom:-3px;
 }
 .qiq-tab:hover { color:${C.dim}; }
 .qiq-tab.is-active { color:${C.text}; border-bottom-color:${C.blue}; }
 .qiq-tab-badge {
-  font-size:10.5px; font-weight:800; color:#04121F; border-radius:99px; padding:2px 7px;
+  font-size:12.5px; font-weight:800; color:#04121F; border-radius:99px; padding:2px 7px;
 }
 .qiq-tab-warn {
-  font-size:10.5px; font-weight:800; color:#FCD34D; background: rgba(245,158,11,.16);
+  font-size:12.5px; font-weight:800; color:#FCD34D; background: rgba(245,158,11,.16);
   border:1px solid rgba(245,158,11,.34); border-radius:99px; padding:1px 7px;
 }
 .qiq-tabbody { padding-top:18px; overflow:auto; flex:1; }
@@ -4201,6 +4465,12 @@ const CSS = `
 /* ------------------------------------------------------- annotated answer */
 .qiq-annot-wrap { display:grid; grid-template-columns: minmax(0,1fr) 300px; gap:18px; align-items:start; }
 @media (max-width: 900px) { .qiq-annot-wrap { grid-template-columns: 1fr; } }
+.qiq-marked-layout { grid-template-columns:minmax(0, 1fr); }
+.qiq-marked-layout > .qiq-margin {
+  max-height:none; grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));
+  gap:12px; overflow:visible; padding-right:0;
+}
+.qiq-marked-layout > .qiq-margin > :first-child { grid-column:1 / -1; margin-bottom:0 !important; }
 .qiq-paper {
   background: linear-gradient(180deg, #0C1526, #0B1220);
   border:1px solid ${C.border}; border-radius:14px; padding:26px 28px;
@@ -4222,7 +4492,7 @@ const CSS = `
 /* floating "+2" / "~1" / "✗0" badge pinned to the right edge of a highlight */
 .qiq-marks-badge {
   display:inline-block; margin-left:5px; padding:1px 6px; border-radius:99px;
-  font-size:10px; font-weight:800; color:#06101F; vertical-align:super; line-height:1.5;
+  font-size:12px; font-weight:800; color:#06101F; vertical-align:super; line-height:1.5;
   letter-spacing:.2px; box-shadow:0 2px 8px rgba(0,0,0,.4);
   animation: qiq-badge-pop .34s cubic-bezier(.34,1.56,.64,1) both .12s;
 }
@@ -4230,48 +4500,89 @@ const CSS = `
   0% { transform: scale(0) translateY(4px); opacity:0; }
   100% { transform: scale(1) translateY(0); opacity:1; }
 }
-.qiq-warn { margin-left:4px; font-size:11px; cursor:help; vertical-align:super; }
-.qiq-warn.is-compact { font-size:10px; }
+.qiq-warn {
+  display:inline-flex; align-items:center; margin-left:6px; padding:2px 7px; border-radius:999px;
+  border:1px solid rgba(245,158,11,.25); background:rgba(245,158,11,.07);
+  color:#D9B46D; font-size:12px; font-weight:700; cursor:help; vertical-align:middle;
+}
+.qiq-warn.is-compact { font-size:11.5px; }
 
 .qiq-pop {
   position:absolute; bottom:calc(100% + 9px); left:0; z-index:30; width:280px;
   background:#111C33; border:1px solid ${C.borderSoft}; border-radius:10px; padding:10px 12px;
-  font-size:12.5px; line-height:1.6; white-space:normal; color:${C.dim};
+  font-size:14px; line-height:1.6; white-space:normal; color:${C.dim};
   box-shadow:0 14px 40px rgba(0,0,0,.55); opacity:0; visibility:hidden;
   transform: translateY(4px); transition:.16s; pointer-events:none;
 }
 .qiq-hl:hover .qiq-pop { opacity:1; visibility:visible; transform:none; }
 
 /* ------------------------------------------------- question paper + refs */
-.qiq-drop-sm { padding:14px 16px; min-height:0; text-align:center; }
+.qiq-drop-sm { padding:18px 18px; min-height:0; text-align:center; }
 
 .qiq-exam { border:1px solid ${C.border}; border-radius:12px; background:#0B1220; padding:12px 13px; }
 .qiq-choice {
   display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:10px;
-  padding:8px 10px; border-radius:9px; font-size:11.5px; color:${C.text};
+  padding:8px 10px; border-radius:9px; font-size:13.5px; color:${C.text};
   background: rgba(37,99,235,.08); border:1px solid rgba(37,99,235,.28);
 }
 .qiq-choice .qiq-exam-marks { width:52px; }
-.qiq-choice-src { margin-left:auto; color:${C.faint}; font-size:10px; }
+.qiq-choice-src { margin-left:auto; color:${C.faint}; font-size:12px; }
 .qiq-exam-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
 .qiq-exam-total { text-align:right; flex-shrink:0; line-height:1.2; }
 .qiq-exam-rows { display:grid; gap:4px; margin-top:11px; max-height:230px; overflow:auto; }
 .qiq-exam-row {
-  display:grid; grid-template-columns: 34px minmax(0,1fr) auto 48px; gap:7px;
-  align-items:center; font-size:11.5px; padding:5px 6px; border-radius:7px; background:#0F172A;
+  display:grid; grid-template-columns: 56px minmax(0,1fr) 64px;
+  column-gap:0; row-gap:7px; align-items:center; font-size:13.5px;
+  padding:8px 10px; border-radius:8px; background:#0F172A;
 }
 .qiq-exam-row.is-missing { background: rgba(245,158,11,.10); }
 .qiq-exam-num { font-weight:800; color:${C.text}; }
-.qiq-exam-text { color:${C.dim}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.qiq-exam-type { color:${C.faint}; font-size:10px; text-transform:uppercase; letter-spacing:.4px; }
+.qiq-exam-text {
+  color:${C.dim}; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  margin-left:7px; margin-right:20px;
+}
 .qiq-exam-marks {
-  width:46px; background:#0A0F1E; border:1px solid ${C.borderSoft}; border-radius:6px;
-  color:${C.text}; font-size:11.5px; padding:3px 5px; text-align:center; font-family:inherit;
+  width:64px; background:#0A0F1E; border:1px solid ${C.borderSoft}; border-radius:7px;
+  color:${C.text}; font-size:13.5px; padding:3px 5px; text-align:center; font-family:inherit;
 }
 .qiq-exam-row.is-missing .qiq-exam-marks { border-color:${C.amber}; }
+.qiq-missing-marks {
+  margin-top:12px; padding:11px; border-radius:10px; background:rgba(245,158,11,.08);
+  border:1px solid rgba(245,158,11,.38);
+}
+.qiq-missing-marks.is-complete { background:rgba(34,197,94,.07); border-color:rgba(34,197,94,.32); }
+.qiq-missing-marks.is-complete .qiq-missing-icon { background:${C.green}; color:#052E16; }
+.qiq-missing-marks.is-complete .qiq-missing-marks-head strong { color:#BBF7D0; }
+.qiq-missing-marks-head { display:flex; align-items:flex-start; gap:9px; color:${C.text}; }
+.qiq-missing-marks-head strong { display:block; font-size:14px; color:#FDE68A; }
+.qiq-missing-marks-head small { display:block; margin-top:2px; color:${C.dim}; font-size:13.5px; line-height:1.45; }
+.qiq-missing-icon {
+  width:20px; height:20px; flex:0 0 20px; display:grid; place-items:center; border-radius:50%;
+  background:${C.amber}; color:#241603; font-size:14px; font-weight:900;
+}
+.qiq-missing-marks-fields { display:grid; gap:7px; margin-top:10px; }
+.qiq-missing-mark-row { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:7px; }
+.qiq-missing-mark-field {
+  display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0;
+  padding:7px 8px 7px 10px; border-radius:8px;
+  background:#0B1220; border:1px solid rgba(245,158,11,.28); color:${C.text};
+  font-size:14px; font-weight:700;
+}
+.qiq-missing-question { min-width:0; flex:1; }
+.qiq-missing-question strong { display:block; white-space:nowrap; font-size:14px; }
+.qiq-missing-question small {
+  display:-webkit-box; margin-top:2px; overflow:hidden; -webkit-box-orient:vertical;
+  -webkit-line-clamp:2; color:${C.dim}; font-size:12.5px; font-weight:500; line-height:1.3;
+}
+.qiq-missing-mark-field .qiq-exam-marks {
+  width:72px; padding:6px 7px; font-size:15px; border-color:${C.amber};
+}
+@media (max-width: 520px) {
+  .qiq-missing-mark-row { grid-template-columns:1fr; }
+}
 .qiq-exam-warn { margin-top:10px; display:grid; gap:6px; }
 .qiq-exam-warnrow {
-  display:flex; gap:7px; align-items:flex-start; font-size:11.5px; line-height:1.55;
+  display:flex; gap:7px; align-items:flex-start; font-size:13.5px; line-height:1.55;
   color:${C.text}; background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.28);
   border-radius:8px; padding:7px 9px;
 }
@@ -4283,42 +4594,70 @@ const CSS = `
   border-radius:12px; padding:12px 14px;
 }
 .qiq-rev-alertrow {
-  display:flex; gap:8px; align-items:flex-start; font-size:12px; line-height:1.6;
+  display:flex; gap:8px; align-items:flex-start; font-size:14px; line-height:1.6;
   color:${C.text}; margin-top:5px;
 }
 .qiq-rev-link {
   background:none; border:none; padding:0; color:${C.blue}; font-size:inherit; font-family:inherit;
   cursor:pointer; text-decoration:underline; text-underline-offset:2px;
 }
-.qiq-rev-index { display:flex; flex-wrap:wrap; gap:6px; }
-.qiq-rev-chip {
-  min-width:34px; padding:4px 8px; border-radius:8px; border:1px solid ${C.borderSoft};
-  background:#0B1220; font-size:11.5px; font-weight:700; font-family:inherit; cursor:pointer;
+.qiq-rev-index-wrap {
+  display:flex; align-items:center; gap:14px; padding:11px 14px; border:1px solid ${C.border};
+  border-radius:11px; background:#0B1220;
 }
-.qiq-rev-chip:hover { filter:brightness(1.4); }
+.qiq-rev-index-label {
+  color:${C.text}; font-size:14px; font-weight:800; flex-shrink:0;
+}
+.qiq-rev-index { display:flex; flex-wrap:wrap; gap:9px; }
+.qiq-rev-chip {
+  min-width:48px; min-height:38px; padding:7px 12px; border-radius:9px; border:1px solid ${C.borderSoft};
+  background:#111B30; font-size:15px; font-weight:800; font-family:inherit; cursor:pointer;
+  box-shadow:0 1px 0 rgba(255,255,255,.035); transition:background .15s, transform .15s;
+}
+.qiq-rev-chip:hover { background:#17243D; transform:translateY(-1px); }
 .qiq-rev-card {
   border:1px solid ${C.border}; border-left:3px solid ${C.borderSoft}; border-radius:12px;
-  background:${C.card}; padding:13px 15px; scroll-margin-top:12px;
+  background:${C.card}; padding:17px 18px; scroll-margin-top:12px;
 }
-.qiq-rev-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
-.qiq-rev-qnum { font-weight:800; font-size:13px; margin-right:7px; }
+.qiq-rev-head {
+  display:grid; grid-template-columns:minmax(0,1fr) auto auto; align-items:center; gap:14px;
+}
+.qiq-rev-qnum { font-weight:800; font-size:15px; margin-right:7px; }
 .qiq-rev-qtext {
-  color:${C.dim}; font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
-  max-width:100%; display:inline-block; vertical-align:bottom;
+  color:${C.text}; font-size:15px; line-height:1.55; white-space:normal;
+  max-width:100%; vertical-align:top;
 }
-.qiq-rev-markbox { display:flex; align-items:center; gap:5px; margin-left:auto; }
-.qiq-rev-markbox .qiq-exam-marks { width:56px; font-size:13px; padding:4px 6px; }
-.qiq-rev-rationale { font-size:12.5px; line-height:1.65; color:${C.text}; margin:10px 0 0; }
+.qiq-rev-markbox {
+  display:inline-flex; align-items:center; gap:7px; width:max-content;
+  margin-left:auto; padding:0; background:transparent; border:0;
+}
+.qiq-rev-marklabel {
+  color:${C.dim}; font-size:11.5px; font-weight:800; letter-spacing:.35px; text-transform:uppercase;
+  white-space:nowrap;
+}
+.qiq-rev-markbox .qiq-exam-marks { width:52px; font-size:14px; padding:6px 7px; }
+.qiq-rev-rationale {
+  font-size:15px; line-height:1.7; color:${C.text}; margin:16px 0 0;
+  padding:12px 14px; border-radius:9px; background:#0B1220; border:1px solid ${C.border};
+}
+.qiq-rev-rationale-label {
+  display:block; margin-bottom:5px; color:#C7D8FF; font-size:12.5px;
+  font-weight:800; letter-spacing:.5px; text-transform:uppercase;
+}
 .qiq-rev-lists { display:grid; gap:4px; margin-top:9px; }
-.qiq-rev-list { list-style:none; margin:0; padding:0; display:grid; gap:3px; font-size:12px; line-height:1.55; }
-.qiq-rev-answer { margin-top:10px; font-size:11.5px; color:${C.faint}; }
-.qiq-rev-answer summary { cursor:pointer; color:${C.dim}; }
+.qiq-rev-list { list-style:none; margin:0; padding:0; display:grid; gap:3px; font-size:14px; line-height:1.55; }
+.qiq-rev-answer { margin-top:10px; font-size:13.5px; color:${C.faint}; }
+.qiq-rev-answer-first { margin-top:16px; }
+.qiq-rev-answer summary { cursor:pointer; color:#C7D8FF; font-weight:700; }
 .qiq-rev-answer p {
   margin:7px 0 0; padding:9px 11px; border-radius:8px; background:#0A0F1E;
   color:${C.dim}; line-height:1.65; white-space:pre-wrap; max-height:220px; overflow:auto;
 }
 .qiq-rev-foot { display:flex; align-items:center; gap:10px; margin-top:11px; flex-wrap:wrap; }
-.qiq-rev-foot .qiq-rev-link { margin-left:auto; font-size:11.5px; }
+.qiq-rev-foot .qiq-rev-link { margin-left:auto; font-size:13.5px; }
+.qiq-reference-note {
+  color:${C.dim}; font-size:13px; line-height:1.5;
+}
 .qiq-rev-total {
   display:flex; align-items:baseline; gap:12px; justify-content:flex-end;
   border-top:1px solid ${C.border}; padding-top:11px;
@@ -4326,11 +4665,35 @@ const CSS = `
 .qiq-rev-card.is-uncounted { opacity:.72; }
 
 .qiq-rev-coverage {
-  border:1px solid ${C.border}; border-radius:12px; background:#0B1220; padding:11px 14px;
+  border:1px solid ${C.border}; border-radius:12px; background:#0B1220; padding:14px 16px;
+}
+.qiq-rev-summary-main {
+  display:flex; align-items:baseline; justify-content:space-between; gap:12px; color:${C.text};
+}
+.qiq-rev-summary-main strong { font-size:15px; }
+.qiq-rev-summary-main span { color:${C.faint}; font-size:13px; }
+.qiq-rev-summary-counts {
+  display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:9px; color:${C.dim}; font-size:14px;
+}
+.qiq-rev-summary-counts strong { color:${C.text}; font-size:16px; margin-right:3px; }
+.qiq-rev-summary-counts .needs-check { color:#D9B46D; }
+.qiq-rev-summary-action {
+  display:flex; justify-content:space-between; align-items:center; gap:16px; margin-top:11px;
+  padding-top:10px; border-top:1px solid ${C.border}; color:${C.dim}; font-size:13.5px;
 }
 .qiq-rev-statusline {
-  display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:8px;
-  font-size:11.5px; line-height:1.5;
+  margin-top:10px; padding:8px 11px; border-radius:8px;
+  background:rgba(245,158,11,.055); border:1px solid rgba(245,158,11,.18);
+  color:#D9B46D; font-size:13.5px; line-height:1.5;
+}
+.qiq-rev-changed {
+  margin-top:10px; color:${C.blue}; font-size:13px;
+}
+.qiq-rev-changed .qiq-rev-link { margin-left:6px; }
+@media (max-width: 760px) {
+  .qiq-rev-head { grid-template-columns:1fr auto; }
+  .qiq-rev-head > div:first-child { grid-column:1 / -1; }
+  .qiq-rev-summary-action { align-items:flex-start; flex-direction:column; gap:7px; }
 }
 /* ---- the run screen: a pipeline reporting on itself, not a loading bar ---- */
 .qiq-run {
@@ -4339,9 +4702,9 @@ const CSS = `
 }
 .qiq-run-head { display:flex; align-items:center; gap:14px; }
 .qiq-run-title { font-size:15px; font-weight:700; color:${C.text}; display:flex; align-items:baseline; gap:2px; }
-.qiq-run-sub { font-size:11.5px; color:${C.faint}; margin-top:3px; line-height:1.5; }
+.qiq-run-sub { font-size:13.5px; color:${C.faint}; margin-top:3px; line-height:1.5; }
 .qiq-run-clock {
-  margin-left:auto; font-size:13px; font-weight:700; color:${C.dim};
+  margin-left:auto; font-size:15px; font-weight:700; color:${C.dim};
   font-variant-numeric: tabular-nums; letter-spacing:.5px;
 }
 .qiq-run-ell::after { content:"…"; animation: qiq-ell 1.4s steps(4,end) infinite; }
@@ -4359,7 +4722,7 @@ const CSS = `
 }
 @keyframes qiq-rail-run { from { background-position:0 0; } to { background-position:200% 0; } }
 .qiq-rail-label {
-  display:block; margin-top:6px; font-size:9.5px; letter-spacing:.4px; text-transform:uppercase;
+  display:block; margin-top:6px; font-size:12px; letter-spacing:.4px; text-transform:uppercase;
   color:${C.faint}; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
 .qiq-rail-seg.is-now .qiq-rail-label { color:${C.text}; }
@@ -4368,14 +4731,14 @@ const CSS = `
   max-height:min(46vh, 340px); overflow:auto; border:1px solid ${C.border}; border-radius:10px;
   background:${C.navy}; padding:9px 4px 9px 10px; display:grid; gap:2px; align-content:start;
 }
-.qiq-trace-idle { font-size:11.5px; color:${C.faint}; padding:4px 2px; }
+.qiq-trace-idle { font-size:13.5px; color:${C.faint}; padding:4px 2px; }
 .qiq-trace-row {
   display:grid; grid-template-columns: 40px 14px minmax(0, auto) 1fr; gap:8px; align-items:baseline;
-  font-size:11.5px; line-height:1.7; padding:1px 0;
+  font-size:13.5px; line-height:1.7; padding:1px 0;
   animation: qiq-trace-in .22s ease-out both;
 }
 @keyframes qiq-trace-in { from { opacity:0; transform: translateY(3px); } to { opacity:1; transform:none; } }
-.qiq-trace-time { color:${C.faint}; font-variant-numeric: tabular-nums; font-size:10.5px; }
+.qiq-trace-time { color:${C.faint}; font-variant-numeric: tabular-nums; font-size:12.5px; }
 .qiq-trace-mark { font-weight:800; color:${C.dim}; }
 .qiq-trace-row.is-ok .qiq-trace-mark { color:${C.green}; }
 .qiq-trace-row.is-warn .qiq-trace-mark { color:${C.amber}; }
@@ -4386,20 +4749,20 @@ const CSS = `
 .qiq-trace-row.is-live { opacity:.9; }
 
 .qiq-proc-coverage {
-  margin-top:20px; font-size:12.5px; color:${C.text};
+  margin-top:20px; font-size:14px; color:${C.text};
   border:1px solid ${C.borderSoft}; border-radius:10px; padding:9px 14px; background:#0B1220;
 }
 
 .qiq-reflist { display:grid; gap:5px; margin-top:8px; }
 .qiq-refitem {
-  display:flex; gap:8px; align-items:center; font-size:11.5px; color:${C.dim};
+  display:flex; gap:8px; align-items:center; font-size:13.5px; color:${C.dim};
   background:#0B1220; border:1px solid ${C.border}; border-radius:8px; padding:6px 9px;
 }
 .qiq-reficon { flex-shrink:0; }
 
 .qiq-ground {
-  display:inline-block; font-size:9.5px; font-weight:800; letter-spacing:.4px;
-  text-transform:uppercase; padding:2px 6px; border-radius:99px; vertical-align:middle;
+  display:inline-block; font-size:12.5px; font-weight:750; letter-spacing:.1px;
+  padding:3px 8px; border-radius:99px; vertical-align:middle;
 }
 .qiq-ground.is-ref { background:rgba(34,197,94,.16); color:${C.green}; }
 .qiq-ground.is-general { background:rgba(148,163,184,.14); color:${C.dim}; }
@@ -4426,39 +4789,52 @@ const CSS = `
 }
 .qiq-ans-region-tag {
   position:absolute; top:-10px; left:8px; padding:1px 7px; border-radius:6px;
-  background:${C.blue}; color:#F8FAFC; font-size:10px; font-weight:800; letter-spacing:.4px;
+  background:${C.blue}; color:#F8FAFC; font-size:12px; font-weight:800; letter-spacing:.4px;
 }
 .qiq-ans-region.is-approx { border-style:dotted; border-color:${C.amber}; background: rgba(245,158,11,.06); }
 .qiq-ans-region.is-approx .qiq-ans-region-tag { background:${C.amber}; color:#1A1206; }
 @keyframes qiq-region-in { from { opacity:0; } to { opacity:1; } }
 
-.qiq-qcard-answer { margin-top:8px; font-size:12px; }
-.qiq-qcard-answer summary { cursor:pointer; color:${C.dim}; font-size:11.5px; }
+.qiq-qcard-answer { margin-top:8px; font-size:14px; }
+.qiq-qcard-answer summary { cursor:pointer; color:${C.dim}; font-size:13.5px; }
 .qiq-qcard-answer p {
   margin:6px 0 0; padding:8px 10px; border-radius:8px; background:${C.navy};
   border:1px solid ${C.border}; color:${C.text}; line-height:1.65; white-space:pre-wrap;
   max-height:150px; overflow:auto;
 }
-.qiq-qcard-points { list-style:none; margin:9px 0 0; padding:0; display:grid; gap:4px; font-size:11.5px; }
+.qiq-qcard-points { list-style:none; margin:9px 0 0; padding:0; display:grid; gap:4px; font-size:13.5px; }
 .qiq-qcard-points li { display:flex; gap:7px; line-height:1.55; }
 
 /* the question behind the highlights, above the pages */
 .qiq-qcard {
-  border:1px solid ${C.border}; border-left:3px solid ${C.blue}; border-radius:10px;
-  background:${C.card}; padding:11px 13px; margin-bottom:12px;
+  border:1px solid #2D405D; border-left:4px solid ${C.blue}; border-radius:12px;
+  background:#111B30; padding:16px 18px; margin-bottom:16px;
 }
-.qiq-qcard-head { display:flex; gap:10px; align-items:flex-start; }
-.qiq-qcard-num { font-size:12px; font-weight:800; color:${C.blue}; flex-shrink:0; padding-top:1px; }
-.qiq-qcard-text { flex:1; min-width:0; font-size:12.5px; color:${C.text}; line-height:1.55; }
+.qiq-qcard-head { display:flex; gap:12px; align-items:flex-start; justify-content:space-between; }
+.qiq-qcard-num {
+  display:inline-flex; padding:5px 9px; border-radius:7px; background:rgba(37,99,235,.16);
+  border:1px solid rgba(96,165,250,.3); font-size:15px; font-weight:800; color:#93B4FF;
+}
+.qiq-qcard-text {
+  margin-top:12px; max-width:1100px; font-size:16px; font-weight:600;
+  color:#F1F5F9; line-height:1.65;
+}
 .qiq-qcard-marks {
-  flex-shrink:0; text-align:right; font-size:15px; font-weight:800; color:${C.text};
+  flex-shrink:0; text-align:right; font-size:18px; font-weight:800; color:${C.text};
   font-variant-numeric: tabular-nums;
 }
-.qiq-qcard-where { font-size:11.5px; margin-top:7px; line-height:1.6; }
-.qiq-qcard-why { font-size:12px; color:${C.dim}; line-height:1.6; margin:7px 0 0; }
+.qiq-qcard-where {
+  font-size:15px; margin-top:13px; line-height:1.55; padding:9px 11px;
+  border-radius:8px; background:#0B1426;
+}
+.qiq-qcard-why {
+  font-size:16px; color:#CBD5E1; line-height:1.75; margin:12px 0 0;
+  padding:12px 14px; border-radius:9px; background:rgba(148,163,184,.06);
+  border:1px solid ${C.border};
+}
 .qiq-page-cap {
   display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap;
-  font-size:11px; color:${C.dim}; padding:7px 3px 0; line-height:1.5;
+  font-size:13px; color:${C.dim}; padding:7px 3px 0; line-height:1.5;
 }
 
 .qiq-ann-box {
@@ -4478,7 +4854,7 @@ const CSS = `
    would put it, and falls inside when the writing runs to the page edge. */
 .qiq-ann-badge {
   position:absolute; left:100%; top:50%; transform:translate(6px,-50%);
-  padding:1px 6px; border-radius:99px; font-size:10px; font-weight:800;
+  padding:1px 6px; border-radius:99px; font-size:12px; font-weight:800;
   color:#06101F; line-height:1.5; letter-spacing:.2px; white-space:nowrap;
   box-shadow:0 2px 8px rgba(0,0,0,.45);
   animation: qiq-badge-pop .34s cubic-bezier(.34,1.56,.64,1) both .12s;
@@ -4488,7 +4864,7 @@ const CSS = `
 .qiq-ann-box.is-tight .qiq-ann-badge { left:auto; right:3px; transform:translate(0,-50%); }
 .qiq-ann-warn {
   position:absolute; right:100%; top:50%; transform:translate(-5px,-50%);
-  font-size:11px; line-height:1; pointer-events:none;
+  font-size:13px; line-height:1; pointer-events:none;
 }
 .qiq-ann-box.is-tight .qiq-ann-warn { right:auto; left:3px; transform:translate(0,-50%); }
 
@@ -4501,7 +4877,7 @@ const CSS = `
 .qiq-geom-note {
   display:flex; gap:9px; align-items:flex-start; margin-bottom:14px;
   background:rgba(245,158,11,.08); border:1px solid rgba(245,158,11,.3);
-  border-radius:10px; padding:10px 12px; font-size:12px; line-height:1.6; color:${C.text};
+  border-radius:10px; padding:10px 12px; font-size:14px; line-height:1.6; color:${C.text};
 }
 .qiq-linkbtn {
   background:none; border:none; padding:0; font:inherit; color:${C.blue};
@@ -4526,10 +4902,10 @@ const CSS = `
 }
 .qiq-note-num {
   width:17px; height:17px; border-radius:50%; display:grid; place-items:center;
-  font-size:9.5px; font-weight:800; color:#06101F;
+  font-size:12px; font-weight:800; color:#06101F;
 }
 .qiq-note-marks {
-  padding:1px 7px; border-radius:99px; font-size:10px; font-weight:800; color:#06101F;
+  padding:1px 7px; border-radius:99px; font-size:12px; font-weight:800; color:#06101F;
 }
 /* The teacher's comment. This used to be set in a cursive "handwriting" face to
    suggest a marked-up page, but the comment is the single most important thing
@@ -4539,7 +4915,7 @@ const CSS = `
    badges instead; the words themselves are plain. */
 .qiq-handwrite {
   font-family: inherit;
-  font-size: 13.5px;
+  font-size:15px;
   line-height: 1.65;
   letter-spacing: 0.1px;
   color: ${C.text};
@@ -4564,9 +4940,9 @@ const CSS = `
   font-weight:800; font-size:21px;
 }
 .qiq-report-title { font-size:19px; font-weight:800; letter-spacing:-.3px; }
-.qiq-report-sub { font-size:11.5px; color:${C.faint}; margin-top:2px; }
+.qiq-report-sub { font-size:13.5px; color:${C.faint}; margin-top:2px; }
 .qiq-report-serial {
-  font-size:11px; color:${C.faint}; letter-spacing:1.4px; text-transform:uppercase;
+  font-size:13px; color:${C.faint}; letter-spacing:1.4px; text-transform:uppercase;
   font-variant-numeric: tabular-nums;
 }
 
@@ -4576,7 +4952,7 @@ const CSS = `
 @media (max-width: 780px) { .qiq-report-fields { grid-template-columns: 1fr; } }
 .qiq-rfield { display:block; }
 .qiq-rfield > span {
-  display:block; font-size:10px; letter-spacing:1.1px; text-transform:uppercase;
+  display:block; font-size:12px; letter-spacing:1.1px; text-transform:uppercase;
   color:${C.faint}; font-weight:700; margin-bottom:5px;
 }
 .qiq-rinput {
@@ -4603,7 +4979,7 @@ const CSS = `
 }
 .qiq-arc-score { font-size:33px; font-weight:800; letter-spacing:-1.2px; font-variant-numeric: tabular-nums; }
 .qiq-arc-total { font-size:16px; font-weight:600; color:${C.faint}; letter-spacing:0; }
-.qiq-arc-pct { font-size:11px; color:${C.faint}; margin-top:2px; letter-spacing:.6px; }
+.qiq-arc-pct { font-size:13px; color:${C.faint}; margin-top:2px; letter-spacing:.6px; }
 
 .qiq-grade-block { text-align:center; }
 .qiq-grade-stamp {
@@ -4617,7 +4993,7 @@ const CSS = `
   100% { transform: scale(1) rotate(0deg); opacity:1; }
 }
 .qiq-grade-caption {
-  font-size:10px; letter-spacing:1.2px; text-transform:uppercase;
+  font-size:12px; letter-spacing:1.2px; text-transform:uppercase;
   color:${C.faint}; margin-top:10px; font-weight:700;
 }
 
@@ -4644,12 +5020,12 @@ const CSS = `
 .qiq-report-section { margin-top:26px; }
 .qiq-report-h {
   display:flex; align-items:center; gap:12px; flex-wrap:wrap;
-  font-size:11px; letter-spacing:1.2px; text-transform:uppercase;
+  font-size:13px; letter-spacing:1.2px; text-transform:uppercase;
   color:${C.dim}; font-weight:800; margin-bottom:12px;
 }
 .qiq-voice { display:inline-flex; align-items:center; gap:6px; margin-left:auto; }
 .qiq-speaking {
-  font-size:10.5px; color:${C.blue}; text-transform:none; letter-spacing:0;
+  font-size:12.5px; color:${C.blue}; text-transform:none; letter-spacing:0;
   animation: qiq-blink 1.4s infinite;
 }
 
@@ -4664,7 +5040,7 @@ const CSS = `
   font-size:17px; line-height:1.75; color:#F1F5F9; min-height:96px;
 }
 .qiq-remark-sign {
-  margin-top:14px; text-align:right; font-size:13px; color:${C.faint}; font-style:italic;
+  margin-top:14px; text-align:right; font-size:15px; color:${C.faint}; font-style:italic;
 }
 .qiq-caret {
   display:inline-block; width:2px; height:1em; background:${C.purple};
@@ -4672,17 +5048,17 @@ const CSS = `
 }
 
 .qiq-table-wrap { overflow-x:auto; border:1px solid ${C.border}; border-radius:12px; }
-.qiq-table { width:100%; border-collapse:collapse; font-size:13px; min-width:640px; }
+.qiq-table { width:100%; border-collapse:collapse; font-size:15px; min-width:640px; }
 .qiq-table th {
-  text-align:left; font-size:10.5px; letter-spacing:.8px; text-transform:uppercase;
+  text-align:left; font-size:12.5px; letter-spacing:.8px; text-transform:uppercase;
   color:${C.dim}; font-weight:700; padding:11px 14px; background:#0B1220;
   border-bottom:1px solid ${C.border};
 }
 .qiq-table td { padding:13px 14px; border-bottom:1px solid rgba(30,41,59,.7); vertical-align:top; }
 .qiq-table tbody tr:hover { background: rgba(37,99,235,.05); }
-.qiq-table tfoot td { background:#0B1220; border-bottom:none; font-size:13.5px; }
+.qiq-table tfoot td { background:#0B1220; border-bottom:none; font-size:15px; }
 .qiq-chip {
-  display:inline-block; font-size:11px; font-weight:700; padding:3px 9px;
+  display:inline-block; font-size:13px; font-weight:700; padding:3px 9px;
   border-radius:99px; border:1px solid; white-space:nowrap;
 }
 
@@ -4690,28 +5066,28 @@ const CSS = `
 @media (max-width: 760px) { .qiq-two-col { grid-template-columns: 1fr; } }
 .qiq-listcard { background:#0B1220; border:1px solid ${C.border}; border-radius:12px; padding:16px 18px; }
 .qiq-list { list-style:none; padding:0; margin:0; display:grid; gap:9px; }
-.qiq-list li { display:flex; gap:9px; font-size:13px; line-height:1.6; color:${C.dim}; }
+.qiq-list li { display:flex; gap:9px; font-size:15px; line-height:1.6; color:${C.dim}; }
 .qiq-study {
-  color:#93B4FF; text-decoration:none; font-size:11.5px; font-weight:700;
+  color:#93B4FF; text-decoration:none; font-size:13.5px; font-weight:700;
   border-bottom:1px dotted #93B4FF; white-space:nowrap; margin-left:2px;
 }
 .qiq-study:hover { color:#C7D8FF; border-bottom-style:solid; }
 
 .qiq-report-foot {
   margin-top:24px; padding-top:14px; border-top:1px solid ${C.border};
-  font-size:10.5px; color:${C.faint}; line-height:1.6;
+  font-size:12.5px; color:${C.faint}; line-height:1.6;
 }
 
 .qiq-mono {
   width:100%; min-height:420px; background:#0B1220; border:1px solid ${C.border};
   border-radius:12px; color:#CBD5E1; padding:18px 20px; resize:vertical; outline:none;
   font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
-  font-size:13px; line-height:1.8; white-space:pre-wrap;
+  font-size:15px; line-height:1.8; white-space:pre-wrap;
 }
 .qiq-mono:focus { border-color:${C.blue}; box-shadow:0 0 0 3px rgba(37,99,235,.16); }
 .qiq-pre {
   margin-top:10px; background:#0B1220; border:1px solid ${C.border}; border-radius:10px;
-  padding:14px; font-size:11.5px; color:${C.faint}; max-height:280px; overflow:auto;
+  padding:14px; font-size:13.5px; color:${C.faint}; max-height:280px; overflow:auto;
   white-space:pre-wrap; word-break:break-word;
   font-family: ui-monospace, "SF Mono", Consolas, monospace;
 }
