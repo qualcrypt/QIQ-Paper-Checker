@@ -2308,9 +2308,6 @@ function EmptyState({ hasPages, hasExam, hasReference }) {
           </div>
         ))}
       </div>
-      <div className="qiq-privacy-note">
-        🔒 Your access key stays protected on the server. Uploaded pages are sent securely for reading and marking.
-      </div>
     </div>
   );
 }
