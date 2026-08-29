@@ -1764,15 +1764,29 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
           <div className="qiq-logo">Q</div>
           <div>
             <div className="qiq-brand-title">
-              QIQ <span style={{ color: C.faint, fontWeight: 500 }}>/</span> Paper Checker for Educators
+              QIQ Paper Checker
             </div>
             <div className="qiq-brand-subtitle">
-              Upload the papers, review the marking, and create a student-ready report
+              For educators · Review papers, confirm marks, and prepare reports
             </div>
           </div>
         </div>
         <div className="qiq-header-actions">
-          <PipelineBar step={pipelineStep} running={pipelineRunning} />
+          {evaluation && !busy ? (
+            <div className="qiq-header-review-status" aria-label="Marks ready for review">
+              <span className="qiq-header-review-dot" aria-hidden="true" />
+              <span>
+                <strong>Marks ready for review</strong>
+                <small>
+                  {[studentName.trim(), subject.trim(), scoreTotal > 0 ? `${scoreAwarded}/${scoreTotal} marks` : ""]
+                    .filter(Boolean)
+                    .join(" · ") || "Review the marks and prepare the final report"}
+                </small>
+              </span>
+            </div>
+          ) : (
+            <PipelineBar step={pipelineStep} running={pipelineRunning} />
+          )}
           <button
             className="qiq-theme-toggle"
             type="button"
@@ -1780,10 +1794,17 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
             title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
           >
-            <span className="qiq-theme-track" aria-hidden="true">
-              <span className="qiq-theme-thumb" />
+            <span className={`qiq-theme-option${theme === "light" ? " is-selected" : ""}`} aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <circle cx="12" cy="12" r="3.5" />
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.42 1.42M17.65 17.65l1.42 1.42M2 12h2M20 12h2M4.93 19.07l1.42-1.42M17.65 6.35l1.42-1.42" />
+              </svg>
             </span>
-            <span className="qiq-theme-state">{theme === "dark" ? "Dark" : "Light"}</span>
+            <span className={`qiq-theme-option${theme === "dark" ? " is-selected" : ""}`} aria-hidden="true">
+              <svg viewBox="0 0 24 24" focusable="false">
+                <path d="M20.2 15.1A8.5 8.5 0 0 1 8.9 3.8 8.5 8.5 0 1 0 20.2 15.1Z" />
+              </svg>
+            </span>
           </button>
         </div>
       </header>
@@ -2439,7 +2460,7 @@ function Processing({ stage, phase, elapsed, progress, notice, marking, coverage
   return (
     <div className="qiq-run">
       <div className="qiq-run-head">
-        <div className="qiq-orb" />
+        <div className="qiq-orb" role="status" aria-label="Paper checking in progress" />
         <div style={{ minWidth: 0 }}>
           <div className="qiq-run-title">
             {active ? active.title : "Checking the paper"}
@@ -2995,7 +3016,7 @@ function MarkedPaper({
 
             {selectedQuestion.rationale && (
               <p className="qiq-qcard-why">
-                <span style={{ fontWeight: 700, color: C.dim }}>Why this mark: </span>
+                <span style={{ fontWeight: 700, color: C.dim }}>Marking Analysis: </span>
                 {selectedQuestion.rationale}
               </p>
             )}
@@ -3654,7 +3675,7 @@ function ReviewPanel({
             {/* Explain the mark after the teacher has seen the student's answer. */}
             {(st === ANSWER_STATUS.UNANSWERED || st === ANSWER_STATUS.NOT_DETECTED || k.rationale || q.rationale) && (
               <p className="qiq-rev-rationale">
-                <span className="qiq-rev-rationale-label">Why this mark</span>
+                <span className="qiq-rev-rationale-label">Marking Analysis</span>
                 {st === ANSWER_STATUS.UNANSWERED
                   ? `Question not attempted.${hasReference ? "" : " No reference material was provided."}`
                   : st === ANSWER_STATUS.NOT_DETECTED
@@ -4313,30 +4334,57 @@ const CSS = `
   backdrop-filter: blur(8px);
 }
 .qiq-header-actions { display:flex; align-items:center; gap:22px; flex-wrap:wrap; }
+.qiq-header-review-status {
+  display:flex; align-items:center; gap:10px; min-width:230px; padding:8px 12px;
+  border:1px solid rgba(34,197,94,.25); border-radius:11px; background:rgba(34,197,94,.06);
+}
+.qiq-header-review-dot {
+  width:10px; height:10px; flex:0 0 10px; border-radius:50%; background:${C.green};
+  box-shadow:0 0 0 4px rgba(34,197,94,.11);
+}
+.qiq-header-review-status strong { display:block; color:${C.text}; font-size:14px; line-height:1.25; }
+.qiq-header-review-status small {
+  display:block; max-width:360px; margin-top:2px; color:${C.dim}; font-size:12.5px;
+  line-height:1.35; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+}
 .qiq-theme-toggle {
-  display:inline-flex; align-items:center; gap:8px; margin-left:8px; padding:7px 10px;
-  border:0; border-radius:9px; background:transparent;
-  color:${C.dim}; font-family:inherit; font-size:13px; font-weight:700; cursor:pointer;
+  display:inline-flex; align-items:center; gap:3px; margin-left:8px; padding:3px;
+  border:1px solid ${C.borderSoft}; border-radius:999px; background:var(--qiq-surface-2);
+  color:${C.dim}; font-family:inherit; cursor:pointer; box-shadow:inset 0 1px 2px rgba(15,23,42,.08);
 }
-.qiq-theme-toggle:hover { color:${C.text}; }
-.qiq-theme-label { color:${C.faint}; font-weight:600; }
-.qiq-theme-state { min-width:34px; text-align:left; }
-.qiq-theme-track {
-  width:34px; height:19px; display:inline-flex; align-items:center; padding:2px; border-radius:999px;
-  background:#303030; border:1px solid ${C.borderSoft}; transition:background .2s;
+.qiq-theme-toggle:hover { border-color:rgba(96,165,250,.55); }
+.qiq-theme-toggle:focus-visible { outline:2px solid ${C.blue}; outline-offset:3px; }
+.qiq-theme-option {
+  width:28px; height:28px; display:grid; place-items:center; border-radius:50%; color:${C.faint};
+  transition:background .2s, color .2s, box-shadow .2s;
 }
-.qiq-theme-thumb {
-  width:13px; height:13px; border-radius:50%; background:#E5E7EB;
-  box-shadow:0 1px 3px rgba(0,0,0,.35); transform:translateX(0); transition:transform .2s, background .2s;
+.qiq-theme-option svg {
+  width:17px; height:17px; fill:none; stroke:currentColor; stroke-width:1.8;
+  stroke-linecap:round; stroke-linejoin:round;
 }
-.qiq-root.is-light .qiq-theme-track { background:#2563EB; }
-.qiq-root.is-light .qiq-theme-thumb { background:#fff; transform:translateX(15px); }
+.qiq-theme-option.is-selected {
+  color:#fff; background:linear-gradient(135deg, ${C.blue}, ${C.purple});
+  box-shadow:0 2px 7px rgba(37,99,235,.28);
+}
+.qiq-root.is-light .qiq-theme-option:first-child.is-selected {
+  color:#92400E; background:#FEF3C7; box-shadow:0 2px 7px rgba(245,158,11,.2);
+}
 .qiq-brand-title { font-size:19px; font-weight:750; letter-spacing:-.25px; }
 .qiq-brand-subtitle { font-size:15px; color:${C.dim}; margin-top:3px; line-height:1.4; }
 .qiq-logo {
+  position:relative; isolation:isolate; overflow:hidden;
   width:38px; height:38px; border-radius:11px; display:grid; place-items:center;
-  background: linear-gradient(135deg, ${C.blue}, ${C.purple});
-  font-weight:800; font-size:19px; color:#fff; box-shadow:0 6px 20px rgba(37,99,235,.38);
+  background:
+    radial-gradient(circle at 86% 88%, rgba(56,189,248,.95) 0, rgba(37,99,235,.42) 24%, transparent 48%),
+    linear-gradient(145deg, #172554 0%, #1D4ED8 56%, #2563EB 100%);
+  border:1px solid rgba(147,197,253,.7);
+  font-weight:850; font-size:19px; color:#fff;
+  text-shadow:0 1px 2px rgba(15,23,42,.32);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.32), inset 0 -8px 18px rgba(15,23,42,.16), 0 7px 18px rgba(37,99,235,.28);
+}
+.qiq-logo::before {
+  content:""; position:absolute; z-index:-1; inset:0;
+  background:linear-gradient(125deg, rgba(255,255,255,.2), transparent 38% 68%, rgba(56,189,248,.18));
 }
 
 .qiq-pipeline { display:flex; align-items:center; flex-wrap:wrap; }
@@ -4369,6 +4417,7 @@ const CSS = `
   .qiq-brand-subtitle { font-size:14px; }
   .qiq-pipeline { width:100%; justify-content:space-between; }
   .qiq-header-actions { width:100%; }
+  .qiq-header-review-status { flex:1; min-width:0; }
   .qiq-theme-toggle { margin-left:auto; }
   .qiq-pipe-line { width:14px; margin:0 5px; }
   .qiq-pipe-item span { font-size:13px !important; }
@@ -4593,10 +4642,14 @@ const CSS = `
 .qiq-teacher-review small { display:block; color:${C.dim}; font-size:13px; line-height:1.5; margin-top:2px; }
 .qiq-orb {
   width:38px; height:38px; border-radius:50%; flex-shrink:0;
-  background: conic-gradient(from 0deg, ${C.blue}, ${C.purple}, ${C.blue});
+  background:conic-gradient(
+    rgba(96,165,250,.2) 0deg 255deg,
+    ${C.blue} 255deg 315deg,
+    ${C.purple} 315deg 360deg
+  );
   mask: radial-gradient(circle 13px at center, transparent 98%, #000 100%);
   -webkit-mask: radial-gradient(circle 13px at center, transparent 98%, #000 100%);
-  animation: qiq-spin 1.1s linear infinite;
+  animation:qiq-spin .75s linear infinite;
 }
 .qiq-rawpage { display:grid; gap:6px; }
 .qiq-rawpage-head {
@@ -4899,7 +4952,8 @@ const CSS = `
 /* ---- the run screen: a pipeline reporting on itself, not a loading bar ---- */
 .qiq-run {
   display:grid; gap:14px; padding:22px 20px; border:1px solid ${C.border};
-  border-radius:14px; background:${C.card}; width:100%;
+  grid-template-rows:auto auto minmax(220px, 1fr) auto;
+  border-radius:14px; background:${C.card}; width:100%; flex:1; min-height:0;
 }
 .qiq-run-head { display:flex; align-items:center; gap:14px; }
 .qiq-run-title { font-size:15px; font-weight:700; color:${C.text}; display:flex; align-items:baseline; gap:2px; }
@@ -4929,7 +4983,7 @@ const CSS = `
 .qiq-rail-seg.is-now .qiq-rail-label { color:${C.text}; }
 
 .qiq-trace {
-  max-height:min(46vh, 340px); overflow:auto; border:1px solid ${C.border}; border-radius:10px;
+  min-height:220px; max-height:none; overflow:auto; border:1px solid ${C.border}; border-radius:10px;
   background:${C.navy}; padding:9px 4px 9px 10px; display:grid; gap:2px; align-content:start;
 }
 .qiq-trace-idle { font-size:13.5px; color:${C.faint}; padding:4px 2px; }
@@ -4950,7 +5004,7 @@ const CSS = `
 .qiq-trace-row.is-live { opacity:.9; }
 
 .qiq-proc-coverage {
-  margin-top:20px; font-size:14px; color:${C.text};
+  margin-top:0; font-size:14px; color:${C.text};
   border:1px solid ${C.borderSoft}; border-radius:10px; padding:9px 14px; background:var(--qiq-surface-2);
 }
 

@@ -62,7 +62,7 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Consolidated repeated coverage and warning panels into one calm **Review summary**.
 - Removed repeated success messages and page-placement warnings from every question card.
 - Replaced technical and mechanical terms with teacher-facing language.
-- Changed **Marking reason** to **Why this mark**.
+- Changed **Marking reason** to **Marking Analysis**.
 - Moved the student's answer before the marking explanation.
 - Opened the student's answer by default so the teacher sees the response before reviewing the awarded mark.
 - Added a quotation-style visual marker for the student's answer instead of a mechanical warning or disclosure icon.
@@ -103,6 +103,10 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Kept completed stages visually distinct and future stages numbered.
 - Ensured **Results Prepared** completes once the marking review is available.
 - Improved progress wording during reading, marking, and report preparation.
+- Kept the detailed workflow stages visible during setup and processing, when they help explain what is happening.
+- Replaced the completed four-stage tracker with a calm **Marks ready for review** status once marking finishes.
+- Added the available student name, subject, and current marks to the completed header status for useful classroom context.
+- Reduced the visual competition between the workflow status and the Light/Dark control.
 
 ## Final report
 
@@ -121,8 +125,11 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Created a purpose-built Light theme with appropriate surfaces, borders, text colours, and contrast.
 - Increased the contrast of the green **All question marks are ready** message in the Light theme for easier reading.
 - Added a persistent theme preference that is remembered between visits.
-- Replaced the original theme button with a compact sliding switch showing the current **Dark** or **Light** state.
+- Replaced the original theme button with a compact Sun/Moon segmented control that shows the active theme within the toggle itself.
 - Improved spacing between the workflow stages and theme switch.
+- Simplified the header identity to **QIQ Paper Checker** with a quieter educator-focused subtitle.
+- Reworked the Q logo from a generic purple treatment to a richer ink-blue identity that matches the educator workspace.
+- Added a restrained cyan accent, inner highlight, stronger edge definition, and softer depth to keep the logo distinctive without overpowering the header.
 
 ## Verification
 
