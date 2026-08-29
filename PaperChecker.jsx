@@ -131,15 +131,15 @@ const SAMPLE_SCHEME = `Q. Explain the process of photosynthesis. (20 marks)
 
 /* ---------------------------------------------------------------- palette -- */
 const C = {
-  navy: "#0A0F1E",
-  card: "#0F172A",
-  border: "#1E293B",
-  borderSoft: "#243247",
+  navy: "var(--qiq-page)",
+  card: "var(--qiq-card)",
+  border: "var(--qiq-border)",
+  borderSoft: "var(--qiq-border-strong)",
   blue: "#2563EB",
   purple: "#7C3AED",
-  text: "#E2E8F0",
-  dim: "#B5C0D1",
-  faint: "#8492A8",
+  text: "var(--qiq-text)",
+  dim: "var(--qiq-dim)",
+  faint: "var(--qiq-faint)",
   green: "#22C55E",
   amber: "#F59E0B",
   red: "#EF4444",
@@ -420,7 +420,7 @@ function useSpeech() {
  * an OCR failure when nothing has been sent yet.
  */
 function PipelineBar({ step, running }) {
-  const steps = ["Upload", "Read Paper", "Mark Answers", "Results"];
+  const steps = ["Upload", "Answer Sheet Read", "Marks Awarded", "Results Prepared"];
   return (
     <div className="qiq-pipeline">
       {steps.map((label, i) => {
@@ -429,7 +429,7 @@ function PipelineBar({ step, running }) {
         return (
           <div key={label} className="qiq-pipe-item">
             <div className={`qiq-pipe-dot${active ? " is-active" : ""}${done ? " is-done" : ""}`}>
-              {done ? "✓" : i + 1}
+              {active ? <span className="qiq-pipe-spinner" aria-label={`${label} in progress`} /> : done ? "✓" : i + 1}
             </div>
             <span
               style={{
@@ -506,6 +506,16 @@ function ConfidenceFlag({ confidence, compact }) {
 /* ============================================================ MAIN APP ===== */
 
 export default function PaperChecker() {
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem("qiq-theme");
+    if (saved === "light" || saved === "dark") return saved;
+    return window.matchMedia?.("(prefers-color-scheme: light)").matches ? "light" : "dark";
+  });
+
+  useEffect(() => {
+    localStorage.setItem("qiq-theme", theme);
+  }, [theme]);
+
   const [pages, setPages] = useState([]); // { id, label, dataUrl }
   /* A Word upload carries digital text, so it skips rasterising and the vision
      pass entirely — `textDoc` holds it until Check Paper runs. */
@@ -518,10 +528,11 @@ export default function PaperChecker() {
   /* Report-card identity fields — kept at this level so the history log and the
      printed report agree, and so they survive tab switches. */
   const [studentName, setStudentName] = useState("");
+  const [rollNumber, setRollNumber] = useState("");
   const [subject, setSubject] = useState("");
   const [reportDate, setReportDate] = useState(todayLabel);
   const [studentDetails, setStudentDetails] = useState([]);
-  const [markNotice, setMarkNotice] = useState("");
+  const [markNotice, setMarkNotice] = useState(null);
 
   const [studentAnswerText, setStudentAnswerText] = useState("");
   /* The transcript is held per page, because the page boundaries are what the
@@ -633,8 +644,19 @@ export default function PaperChecker() {
     return () => clearInterval(id);
   }, [busy]);
 
-  const pipelineStep =
-    stage === "ocr" ? 1 : stage === "evaluating" ? 2 : stage === "done" ? 3 : pages.length || textDoc ? 1 : 0;
+  const uploadInProgress = preparing || examBusy || refBusy;
+  const pipelineStep = uploadInProgress
+    ? 0
+    : stage === "ocr"
+    ? 1
+    : stage === "evaluating"
+    ? 2
+    : stage === "done"
+    ? 4
+    : pages.length || textDoc
+    ? 1
+    : 0;
+  const pipelineRunning = busy || uploadInProgress;
 
   /* --------------------------------------------------------------- derive -- */
   const editedText = editedPages.join("\n\n");
@@ -1342,7 +1364,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
   /** Returns the first problem plus which field caused it, so the UI can point at it. */
   function validate({ needPages, needScheme = true }) {
     if (needPages && pages.length === 0)
-      return { field: "pages", message: "Upload the student's answer paper first." };
+      return { field: "pages", message: "Upload the student's answer sheet first." };
 
     /* With a question paper loaded, the questions and their marks come from the
        paper itself — the scheme box and the total field are not needed. */
@@ -1711,13 +1733,13 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
       else next[i] = value;
       return next;
     });
-    setMarkNotice("Mark updated");
-    window.setTimeout(() => setMarkNotice(""), 1800);
+    setMarkNotice({ index: i, text: "Mark updated" });
+    window.setTimeout(() => setMarkNotice(null), 1800);
   };
 
   /* ============================================================== RENDER === */
   return (
-    <div className="qiq-root">
+    <div className={`qiq-root${theme === "light" ? " is-light" : ""}`}>
       <style>{CSS}</style>
 
       <header className="qiq-header qiq-noprint">
@@ -1732,7 +1754,21 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             </div>
           </div>
         </div>
-        <PipelineBar step={pipelineStep} running={busy} />
+        <div className="qiq-header-actions">
+          <PipelineBar step={pipelineStep} running={pipelineRunning} />
+          <button
+            className="qiq-theme-toggle"
+            type="button"
+            onClick={() => setTheme((current) => current === "dark" ? "light" : "dark")}
+            aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+            title={`Switch to ${theme === "dark" ? "light" : "dark"} theme`}
+          >
+            <span className="qiq-theme-track" aria-hidden="true">
+              <span className="qiq-theme-thumb" />
+            </span>
+            <span className="qiq-theme-state">{theme === "dark" ? "Dark" : "Light"}</span>
+          </button>
+        </div>
       </header>
 
       <div className="qiq-grid">
@@ -1819,7 +1855,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             <div className="qiq-upload-icon is-optional" aria-hidden="true">{refBusy ? "…" : "2"}</div>
             <div className="qiq-upload-body">
               <div className="qiq-upload-title">
-                {refBusy ? "Preparing reference material…" : "Choose reference material"}
+                {refBusy ? "Preparing reference material…" : refFiles.length ? "Reference material added" : "Choose reference material"}
               </div>
               <div className="qiq-upload-copy">
                 Textbook, notes, syllabus, or model answers to guide marking.
@@ -1902,7 +1938,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             <div className="qiq-drop-icon">{preparing ? <span className="qiq-spinner" /> : "↑"}</div>
             <div className="qiq-upload-body">
               <div className="qiq-upload-title is-large">
-                {preparing ? "Preparing answer pages…" : "Choose the student's answer sheet"}
+                {preparing ? "Preparing answer pages…" : pages.length || textDoc ? "Student answer sheet added" : "Choose the student's answer sheet"}
               </div>
               <div className="qiq-upload-copy">
                 Drag and drop a PDF, Word document, JPG, or PNG. Scanned and handwritten answer sheets are supported.
@@ -1972,9 +2008,9 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             <summary className="qiq-collapsible-summary">
               <span className="qiq-step-num">4</span>
               <span className="qiq-collapsible-title">Student details · Optional</span>
-              {(studentName.trim() || subject.trim() || studentDetails.some((row) => row.value.trim())) && (
+              {(studentName.trim() || rollNumber.trim() || subject.trim() || studentDetails.some((row) => row.value.trim())) && (
                 <span className="qiq-collapsible-value">
-                  {[studentName.trim(), subject.trim(), ...studentDetails.map((row) => row.value.trim())]
+                  {[studentName.trim(), rollNumber.trim(), subject.trim(), ...studentDetails.map((row) => row.value.trim())]
                     .filter(Boolean)
                     .join(" · ")}
                 </span>
@@ -1982,33 +2018,48 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               <span className="qiq-collapsible-chevron" aria-hidden="true">⌄</span>
             </summary>
             <div className="qiq-collapsible-body">
-              <input
-                className="qiq-input"
-                value={studentName}
-                onChange={(e) => setStudentName(e.target.value)}
-                placeholder="Student name for the report"
-              />
-              <input
-                className="qiq-input"
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="Subject, for example Biology"
-              />
+              <label className="qiq-detail-field">
+                <span>Name</span>
+                <input
+                  className="qiq-input"
+                  value={studentName}
+                  onChange={(e) => setStudentName(e.target.value)}
+                  placeholder="Student name"
+                />
+              </label>
+              <label className="qiq-detail-field">
+                <span>Roll No.</span>
+                <input
+                  className="qiq-input"
+                  value={rollNumber}
+                  onChange={(e) => setRollNumber(e.target.value)}
+                  placeholder="Roll number"
+                />
+              </label>
+              <label className="qiq-detail-field">
+                <span>Subject</span>
+                <input
+                  className="qiq-input"
+                  value={subject}
+                  onChange={(e) => setSubject(e.target.value)}
+                  placeholder="For example, Biology"
+                />
+              </label>
               {studentDetails.map((row) => (
                 <div className="qiq-detail-row" key={row.id}>
                   <input
                     className="qiq-input"
                     value={row.label}
                     onChange={(e) => updateStudentDetail(row.id, "label", e.target.value)}
-                    placeholder="Field, for example Roll number"
-                    aria-label="Student detail field name"
+                    placeholder="For example, Class or Section"
+                    aria-label="Name of the student information"
                   />
                   <input
                     className="qiq-input"
                     value={row.value}
                     onChange={(e) => updateStudentDetail(row.id, "value", e.target.value)}
-                    placeholder="Value"
-                    aria-label={row.label || "Student detail value"}
+                    placeholder="Enter details"
+                    aria-label={row.label || "Student information"}
                   />
                   <button
                     className="qiq-detail-remove"
@@ -2016,57 +2067,59 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     onClick={() => removeStudentDetail(row.id)}
                     aria-label="Remove this student detail"
                   >
-                    Remove
+                    Delete
                   </button>
                 </div>
               ))}
               <button className="qiq-add-detail" type="button" onClick={addStudentDetail}>
-                Add another detail
+                Add more student information
               </button>
             </div>
           </details>
 
-          {/* The question paper supplies the questions and their marks, so these
-              two inputs are only needed for the original scheme-based flow. */}
+          <SectionTitle
+            n="5"
+            title={`Expected answer / marking scheme${examMode ? " · Optional" : ""}`}
+            action={
+              !expectedAnswer.trim() && (
+                <button
+                  className="qiq-mini-btn"
+                  onClick={() => {
+                    setExpectedAnswer(SAMPLE_SCHEME);
+                    setInvalid("");
+                    setError("");
+                  }}
+                >
+                  Use sample
+                </button>
+              )
+            }
+          />
+          <textarea
+            id="qiq-field-scheme"
+            className={`qiq-input qiq-textarea${invalid === "scheme" ? " qiq-invalid" : ""}`}
+            value={expectedAnswer}
+            onChange={(e) => {
+              setExpectedAnswer(e.target.value);
+              if (invalid === "scheme") {
+                setInvalid("");
+                setError("");
+              }
+            }}
+            placeholder="Add the expected points, acceptable alternatives, and how marks should be awarded."
+          />
+          <div className="qiq-hint">
+            {expectedAnswer.trim()
+              ? `Teacher guidance added · ${expectedAnswer.trim().split(/\s+/).length} words`
+              : examMode
+              ? "Optional — add guidance if you want to adjust how the answers are marked."
+              : "Add an expected answer or marking scheme before checking the paper."}
+          </div>
+
+          {/* The question paper already supplies the total. Without one, the
+              teacher provides the maximum marks here. */}
           {!examMode && (
             <>
-            <SectionTitle
-              n="5"
-              title="Expected answer / marking scheme"
-              action={
-                !expectedAnswer.trim() && (
-                  <button
-                    className="qiq-mini-btn"
-                    onClick={() => {
-                      setExpectedAnswer(SAMPLE_SCHEME);
-                      setInvalid("");
-                      setError("");
-                    }}
-                  >
-                    Use sample
-                  </button>
-                )
-              }
-            />
-            <textarea
-              id="qiq-field-scheme"
-              className={`qiq-input qiq-textarea${invalid === "scheme" ? " qiq-invalid" : ""}`}
-              value={expectedAnswer}
-              onChange={(e) => {
-                setExpectedAnswer(e.target.value);
-                if (invalid === "scheme") {
-                  setInvalid("");
-                  setError("");
-                }
-              }}
-              placeholder="Type or paste what a full-mark answer must cover — one line per point, with the marks for each."
-            />
-            <div className="qiq-hint">
-              {expectedAnswer.trim()
-                ? `${expectedAnswer.trim().split(/\s+/).length} words entered`
-                : "Empty — this box must contain real text before the paper can be graded."}
-            </div>
-
             <SectionTitle n="6" title="Total marks" />
             <input
               id="qiq-field-marks"
@@ -2248,6 +2301,8 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     runKey={evalRun}
                     studentName={studentName}
                     setStudentName={setStudentName}
+                    rollNumber={rollNumber}
+                    setRollNumber={setRollNumber}
                     subject={subject}
                     setSubject={setSubject}
                     reportDate={reportDate}
@@ -2283,7 +2338,7 @@ function EmptyState({ hasPages, hasExam, hasReference }) {
   const steps = [
     { done: hasExam, label: "Question paper", note: hasExam ? "Questions and marks added" : "Recommended to save setup time" },
     { done: hasReference, label: "Reference material", note: hasReference ? "Ready to guide marking" : "Optional — textbook, notes, or model answers" },
-    { done: hasPages, label: "Student answer paper", note: hasPages ? "Ready to be checked" : "Required before checking" },
+    { done: hasPages, label: "Student answer sheet", note: hasPages ? "Ready to be checked" : "Required before checking" },
   ];
   return (
     <div className="qiq-empty">
@@ -3433,7 +3488,6 @@ function ReviewPanel({
         <div className="qiq-rev-coverage">
           <div className="qiq-rev-summary-main">
             <strong>Review summary</strong>
-            {markNotice && <span className="qiq-mark-saved">{markNotice}</span>}
             {notCounted.length > 0 && (
               <span>{required.length} counted · {notCounted.length} not required</span>
             )}
@@ -3569,6 +3623,7 @@ function ReviewPanel({
                   aria-label={`Final mark for ${k.questionNumber ? "question " + k.questionNumber : "point " + (i + 1)}`}
                 />
                 <span style={{ color: C.faint, fontSize: 14 }}>/ {k.marksTotal ?? "—"}</span>
+                {markNotice?.index === i && <span className="qiq-mark-saved">{markNotice.text}</span>}
               </span>
             </div>
 
@@ -3720,6 +3775,8 @@ function ReportCard({
   runKey,
   studentName,
   setStudentName,
+  rollNumber,
+  setRollNumber,
   subject,
   setSubject,
   reportDate,
@@ -3805,6 +3862,15 @@ function ReportCard({
               className="qiq-rinput"
               value={studentName}
               onChange={(e) => setStudentName(e.target.value)}
+              placeholder="—"
+            />
+          </label>
+          <label className="qiq-rfield">
+            <span>Roll No.</span>
+            <input
+              className="qiq-rinput"
+              value={rollNumber}
+              onChange={(e) => setRollNumber(e.target.value)}
               placeholder="—"
             />
           </label>
@@ -4165,6 +4231,21 @@ function RawView({ pageTexts, setPageTexts, geometryByPage = {}, dirty, onReEval
 
 const CSS = `
 .qiq-root {
+  --qiq-page:#0A0F1E;
+  --qiq-card:#0F172A;
+  --qiq-surface-2:#0B1220;
+  --qiq-surface-deep:#0A0F1E;
+  --qiq-surface-raised:#111B30;
+  --qiq-editor:#0C1526;
+  --qiq-pop:#111C33;
+  --qiq-hover:#17243D;
+  --qiq-border:#1E293B;
+  --qiq-border-strong:#243247;
+  --qiq-text:#E2E8F0;
+  --qiq-dim:#B5C0D1;
+  --qiq-faint:#8492A8;
+  --qiq-header:linear-gradient(180deg, rgba(15,23,42,.92), rgba(15,23,42,.7));
+  --qiq-shadow:0 12px 40px rgba(0,0,0,.28);
   min-height: 100vh; background:
     radial-gradient(900px 500px at 12% -8%, rgba(37,99,235,0.16), transparent 60%),
     radial-gradient(700px 460px at 92% 0%, rgba(124,58,237,0.14), transparent 60%),
@@ -4175,14 +4256,64 @@ const CSS = `
   padding: 20px;
   font-size: 16px;
 }
+.qiq-root.is-light {
+  --qiq-page:#F3F6FB;
+  --qiq-card:#FFFFFF;
+  --qiq-surface-2:#F7F9FC;
+  --qiq-surface-deep:#FFFFFF;
+  --qiq-surface-raised:#EEF3FA;
+  --qiq-editor:#FFFFFF;
+  --qiq-pop:#FFFFFF;
+  --qiq-hover:#E5ECF6;
+  --qiq-border:#D9E1EC;
+  --qiq-border-strong:#C6D1DF;
+  --qiq-text:#172033;
+  --qiq-dim:#4C5B70;
+  --qiq-faint:#6D7C91;
+  --qiq-header:linear-gradient(180deg, rgba(255,255,255,.98), rgba(247,249,252,.96));
+  --qiq-shadow:0 12px 34px rgba(38,55,77,.10);
+}
+.qiq-root.is-light .qiq-mini-btn,
+.qiq-root.is-light .qiq-link,
+.qiq-root.is-light .qiq-rev-link,
+.qiq-root.is-light .qiq-linkbtn,
+.qiq-root.is-light .qiq-study { color:#1D4ED8; }
+.qiq-root.is-light .qiq-upload-confirm { color:#166534; }
+.qiq-root.is-light .qiq-cut,
+.qiq-root.is-light .qiq-notice,
+.qiq-root.is-light .qiq-exam-warnrow { color:#92400E; }
+.qiq-root.is-light .qiq-cut strong,
+.qiq-root.is-light .qiq-missing-marks-head strong { color:#78350F; }
+.qiq-root.is-light .qiq-tab-warn { color:#92400E; }
+.qiq-root.is-light .qiq-input::placeholder,
+.qiq-root.is-light .qiq-rinput::placeholder { color:#7A8798; }
 .qiq-root *, .qiq-root *::before, .qiq-root *::after { box-sizing: border-box; }
 
 .qiq-header {
   display:flex; align-items:center; justify-content:space-between; gap:20px; flex-wrap:wrap;
-  background: linear-gradient(180deg, rgba(15,23,42,.92), rgba(15,23,42,.7));
+  background:var(--qiq-header);
   border:1px solid ${C.border}; border-radius:16px; padding:14px 18px; margin-bottom:16px;
   backdrop-filter: blur(8px);
 }
+.qiq-header-actions { display:flex; align-items:center; gap:22px; flex-wrap:wrap; }
+.qiq-theme-toggle {
+  display:inline-flex; align-items:center; gap:8px; margin-left:8px; padding:7px 10px;
+  border:0; border-radius:9px; background:transparent;
+  color:${C.dim}; font-family:inherit; font-size:13px; font-weight:700; cursor:pointer;
+}
+.qiq-theme-toggle:hover { color:${C.text}; }
+.qiq-theme-label { color:${C.faint}; font-weight:600; }
+.qiq-theme-state { min-width:34px; text-align:left; }
+.qiq-theme-track {
+  width:34px; height:19px; display:inline-flex; align-items:center; padding:2px; border-radius:999px;
+  background:#303030; border:1px solid ${C.borderSoft}; transition:background .2s;
+}
+.qiq-theme-thumb {
+  width:13px; height:13px; border-radius:50%; background:#E5E7EB;
+  box-shadow:0 1px 3px rgba(0,0,0,.35); transform:translateX(0); transition:transform .2s, background .2s;
+}
+.qiq-root.is-light .qiq-theme-track { background:#2563EB; }
+.qiq-root.is-light .qiq-theme-thumb { background:#fff; transform:translateX(15px); }
 .qiq-brand-title { font-size:19px; font-weight:750; letter-spacing:-.25px; }
 .qiq-brand-subtitle { font-size:15px; color:${C.dim}; margin-top:3px; line-height:1.4; }
 .qiq-logo {
@@ -4195,13 +4326,17 @@ const CSS = `
 .qiq-pipe-item { display:flex; align-items:center; gap:8px; }
 .qiq-pipe-dot {
   width:24px; height:24px; border-radius:50%; display:grid; place-items:center;
-  font-size:13px; font-weight:700; background:#0B1220; color:${C.faint};
+  font-size:13px; font-weight:700; background:var(--qiq-surface-2); color:${C.faint};
   border:1px solid ${C.border}; transition:.3s;
 }
 .qiq-pipe-dot.is-done { background:${C.blue}; border-color:${C.blue}; color:#fff; }
 .qiq-pipe-dot.is-active {
   background: linear-gradient(135deg, ${C.blue}, ${C.purple}); border-color:transparent; color:#fff;
   animation: qiq-pulse 2s infinite;
+}
+.qiq-pipe-spinner {
+  width:11px; height:11px; border-radius:50%; border:2px solid rgba(255,255,255,.38);
+  border-top-color:#fff; animation:qiq-spin .7s linear infinite;
 }
 .qiq-pipe-line { width:34px; height:2px; margin:0 10px; border-radius:2px; transition:.4s; }
 @keyframes qiq-pulse { 0%,100%{box-shadow:0 0 0 4px rgba(37,99,235,.18)} 50%{box-shadow:0 0 0 8px rgba(37,99,235,.06)} }
@@ -4216,6 +4351,8 @@ const CSS = `
   .qiq-brand-title { font-size:16px; }
   .qiq-brand-subtitle { font-size:14px; }
   .qiq-pipeline { width:100%; justify-content:space-between; }
+  .qiq-header-actions { width:100%; }
+  .qiq-theme-toggle { margin-left:auto; }
   .qiq-pipe-line { width:14px; margin:0 5px; }
   .qiq-pipe-item span { font-size:13px !important; }
   .qiq-empty { padding:36px 8px; }
@@ -4223,7 +4360,7 @@ const CSS = `
 }
 .qiq-panel {
   background: ${C.card}; border:1px solid ${C.border}; border-radius:16px; padding:18px;
-  box-shadow: 0 12px 40px rgba(0,0,0,.28);
+  box-shadow:var(--qiq-shadow);
   min-width: 0; /* a grid child must be allowed to shrink, or wide content escapes */
   overflow: hidden;
 }
@@ -4236,7 +4373,7 @@ const CSS = `
   border:1px solid rgba(37,99,235,.3);
 }
 .qiq-input {
-  width:100%; background:#0B1220; border:1px solid ${C.border}; border-radius:10px;
+  width:100%; background:var(--qiq-surface-2); border:1px solid ${C.border}; border-radius:10px;
   color:${C.text}; padding:13px 14px; font-size:15px; font-family:inherit; outline:none;
   transition: border-color .18s, box-shadow .18s;
 }
@@ -4246,7 +4383,7 @@ const CSS = `
 .qiq-input::placeholder { color:#455066; font-style:italic; }
 .qiq-textarea { min-height:150px; resize:vertical; line-height:1.65; }
 .qiq-collapsible {
-  margin-top:20px; border:1px solid ${C.border}; border-radius:12px; background:#0B1220;
+  margin-top:20px; border:1px solid ${C.border}; border-radius:12px; background:var(--qiq-surface-2);
   overflow:hidden;
 }
 .qiq-collapsible-summary {
@@ -4269,6 +4406,21 @@ const CSS = `
 .qiq-collapsible-body {
   display:grid; gap:9px; padding:0 14px 14px; border-top:1px solid ${C.border}; padding-top:13px;
 }
+.qiq-detail-field { display:grid; gap:6px; }
+.qiq-detail-field > span {
+  color:${C.dim}; font-size:13px; font-weight:700;
+}
+.qiq-detail-row { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto; gap:8px; align-items:center; }
+.qiq-detail-remove, .qiq-add-detail {
+  border:1px solid ${C.borderSoft}; border-radius:8px; background:var(--qiq-surface-2); color:${C.dim};
+  font-family:inherit; font-size:13px; font-weight:600; padding:9px 11px; cursor:pointer;
+}
+.qiq-detail-remove:hover { color:#FCA5A5; border-color:rgba(239,68,68,.4); }
+.qiq-add-detail { justify-self:start; color:#AFC5FF; border-color:rgba(96,165,250,.35); }
+@media (max-width:520px) {
+  .qiq-detail-row { grid-template-columns:1fr; }
+  .qiq-detail-remove { justify-self:start; }
+}
 
 .qiq-invalid { border-color:${C.red} !important; box-shadow:0 0 0 3px rgba(239,68,68,.14) !important; }
 .qiq-hint { margin-top:7px; font-size:14px; color:${C.dim}; line-height:1.55; }
@@ -4289,6 +4441,16 @@ const CSS = `
 .qiq-drop:hover, .qiq-drop.is-dragging {
   border-color:${C.blue}; background: rgba(37,99,235,.09); transform: translateY(-1px);
 }
+.qiq-drop.is-complete {
+  flex-direction:row; justify-content:space-between; min-height:0; padding:10px 12px;
+  border-style:solid; background:var(--qiq-surface-2);
+}
+.qiq-drop.is-complete .qiq-upload-icon,
+.qiq-drop.is-complete .qiq-drop-icon,
+.qiq-drop.is-complete .qiq-upload-copy { display:none; }
+.qiq-drop.is-complete .qiq-upload-body { width:auto; text-align:left; }
+.qiq-drop.is-complete .qiq-upload-title { font-size:14px; color:${C.dim}; }
+.qiq-drop.is-complete .qiq-upload-action { margin-top:0; flex-shrink:0; }
 .qiq-upload-icon {
   width:30px; height:30px; border-radius:9px; display:grid; place-items:center; margin-bottom:9px;
   color:#DCE8FF; background:rgba(37,99,235,.24); border:1px solid rgba(96,165,250,.45);
@@ -4319,7 +4481,7 @@ const CSS = `
   border:1px solid rgba(37,99,235,.32); font-size:17px; color:#A9C3FF;
 }
 .qiq-file {
-  display:flex; align-items:center; gap:10px; background:#0B1220;
+  display:flex; align-items:center; gap:10px; background:var(--qiq-surface-2);
   border:1px solid ${C.border}; border-radius:10px; padding:8px 10px;
   min-width:0; max-width:100%; overflow:hidden;
 }
@@ -4342,9 +4504,10 @@ const CSS = `
   font-family:inherit; box-shadow:0 8px 24px rgba(37,99,235,.3); transition:.18s;
 }
 .qiq-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow:0 12px 30px rgba(37,99,235,.42); }
+.qiq-primary-action { position:sticky; bottom:12px; z-index:12; }
 .qiq-btn:disabled { opacity:.65; cursor:progress; box-shadow:none; }
 .qiq-btn-ghost {
-  margin-top:0; background:#0B1220; border:1px solid ${C.border}; color:${C.dim};
+  margin-top:0; background:var(--qiq-surface-2); border:1px solid ${C.border}; color:${C.dim};
   box-shadow:none; font-weight:600; font-size:14px; padding:10px 12px;
 }
 .qiq-btn-ghost:hover:not(:disabled) { color:${C.text}; border-color:${C.blue}; transform:none; box-shadow:none; }
@@ -4382,7 +4545,7 @@ const CSS = `
 .qiq-setup-list { width:min(100%, 560px); display:grid; gap:10px; text-align:left; }
 .qiq-setup-item {
   display:flex; align-items:center; gap:13px; padding:13px 15px; border:1px solid ${C.border};
-  border-radius:12px; background:#0B1220; color:${C.text};
+  border-radius:12px; background:var(--qiq-surface-2); color:${C.text};
 }
 .qiq-setup-item.is-done { border-color:rgba(34,197,94,.32); background:rgba(34,197,94,.055); }
 .qiq-setup-status {
@@ -4431,7 +4594,7 @@ const CSS = `
 
 /* ---------------------------------------------------------- history cards */
 .qiq-hist {
-  display:flex; align-items:center; gap:10px; background:#0B1220;
+  display:flex; align-items:center; gap:10px; background:var(--qiq-surface-2);
   border:1px solid ${C.border}; border-radius:10px; padding:8px 11px; transition:.15s;
 }
 .qiq-hist:hover { border-color:${C.borderSoft}; transform: translateX(2px); }
@@ -4469,10 +4632,10 @@ const CSS = `
 }
 .qiq-marked-layout > .qiq-margin > :first-child { grid-column:1 / -1; margin-bottom:0 !important; }
 .qiq-paper {
-  background: linear-gradient(180deg, #0C1526, #0B1220);
+  background:linear-gradient(180deg, var(--qiq-editor), var(--qiq-surface-2));
   border:1px solid ${C.border}; border-radius:14px; padding:26px 28px;
   font-size:15px; line-height:2.35; white-space:pre-wrap; word-break:break-word;
-  color:#DCE5F2; max-height:62vh; overflow:auto;
+  color:${C.text}; max-height:62vh; overflow:auto;
   background-image: repeating-linear-gradient(180deg, transparent 0 34px, rgba(148,163,184,.055) 34px 35px);
 }
 .qiq-hl {
@@ -4506,7 +4669,7 @@ const CSS = `
 
 .qiq-pop {
   position:absolute; bottom:calc(100% + 9px); left:0; z-index:30; width:280px;
-  background:#111C33; border:1px solid ${C.borderSoft}; border-radius:10px; padding:10px 12px;
+  background:var(--qiq-pop); border:1px solid ${C.borderSoft}; border-radius:10px; padding:10px 12px;
   font-size:14px; line-height:1.6; white-space:normal; color:${C.dim};
   box-shadow:0 14px 40px rgba(0,0,0,.55); opacity:0; visibility:hidden;
   transform: translateY(4px); transition:.16s; pointer-events:none;
@@ -4516,7 +4679,7 @@ const CSS = `
 /* ------------------------------------------------- question paper + refs */
 .qiq-drop-sm { padding:18px 18px; min-height:0; text-align:center; }
 
-.qiq-exam { border:1px solid ${C.border}; border-radius:12px; background:#0B1220; padding:12px 13px; }
+.qiq-exam { border:1px solid ${C.border}; border-radius:12px; background:var(--qiq-surface-2); padding:12px 13px; }
 .qiq-choice {
   display:flex; align-items:center; gap:7px; flex-wrap:wrap; margin-top:10px;
   padding:8px 10px; border-radius:9px; font-size:13.5px; color:${C.text};
@@ -4530,7 +4693,7 @@ const CSS = `
 .qiq-exam-row {
   display:grid; grid-template-columns: 56px minmax(0,1fr) 64px;
   column-gap:0; row-gap:7px; align-items:center; font-size:13.5px;
-  padding:8px 10px; border-radius:8px; background:#0F172A;
+  padding:8px 10px; border-radius:8px; background:${C.card};
 }
 .qiq-exam-row.is-missing { background: rgba(245,158,11,.10); }
 .qiq-exam-num { font-weight:800; color:${C.text}; }
@@ -4539,7 +4702,7 @@ const CSS = `
   margin-left:7px; margin-right:20px;
 }
 .qiq-exam-marks {
-  width:64px; background:#0A0F1E; border:1px solid ${C.borderSoft}; border-radius:7px;
+  width:64px; background:var(--qiq-surface-deep); border:1px solid ${C.borderSoft}; border-radius:7px;
   color:${C.text}; font-size:13.5px; padding:3px 5px; text-align:center; font-family:inherit;
 }
 .qiq-exam-row.is-missing .qiq-exam-marks { border-color:${C.amber}; }
@@ -4562,7 +4725,7 @@ const CSS = `
 .qiq-missing-mark-field {
   display:flex; align-items:center; justify-content:space-between; gap:8px; min-width:0;
   padding:7px 8px 7px 10px; border-radius:8px;
-  background:#0B1220; border:1px solid rgba(245,158,11,.28); color:${C.text};
+  background:var(--qiq-surface-2); border:1px solid rgba(245,158,11,.28); color:${C.text};
   font-size:14px; font-weight:700;
 }
 .qiq-missing-question { min-width:0; flex:1; }
@@ -4600,7 +4763,7 @@ const CSS = `
 }
 .qiq-rev-index-wrap {
   display:flex; align-items:center; gap:14px; padding:11px 14px; border:1px solid ${C.border};
-  border-radius:11px; background:#0B1220;
+  border-radius:11px; background:var(--qiq-surface-2);
 }
 .qiq-rev-index-label {
   color:${C.text}; font-size:14px; font-weight:800; flex-shrink:0;
@@ -4608,10 +4771,10 @@ const CSS = `
 .qiq-rev-index { display:flex; flex-wrap:wrap; gap:9px; }
 .qiq-rev-chip {
   min-width:48px; min-height:38px; padding:7px 12px; border-radius:9px; border:1px solid ${C.borderSoft};
-  background:#111B30; font-size:15px; font-weight:800; font-family:inherit; cursor:pointer;
+  background:var(--qiq-surface-raised); font-size:15px; font-weight:800; font-family:inherit; cursor:pointer;
   box-shadow:0 1px 0 rgba(255,255,255,.035); transition:background .15s, transform .15s;
 }
-.qiq-rev-chip:hover { background:#17243D; transform:translateY(-1px); }
+.qiq-rev-chip:hover { background:var(--qiq-hover); transform:translateY(-1px); }
 .qiq-rev-card {
   border:1px solid ${C.border}; border-left:3px solid ${C.borderSoft}; border-radius:12px;
   background:${C.card}; padding:17px 18px; scroll-margin-top:12px;
@@ -4626,7 +4789,7 @@ const CSS = `
 }
 .qiq-rev-markbox {
   display:inline-flex; align-items:center; gap:7px; width:max-content;
-  margin-left:auto; padding:0; background:transparent; border:0;
+  position:relative; margin-left:auto; padding:0; background:transparent; border:0;
 }
 .qiq-rev-marklabel {
   color:${C.dim}; font-size:11.5px; font-weight:800; letter-spacing:.35px; text-transform:uppercase;
@@ -4635,19 +4798,30 @@ const CSS = `
 .qiq-rev-markbox .qiq-exam-marks { width:52px; font-size:14px; padding:6px 7px; }
 .qiq-rev-rationale {
   font-size:15px; line-height:1.7; color:${C.text}; margin:16px 0 0;
-  padding:12px 14px; border-radius:9px; background:#0B1220; border:1px solid ${C.border};
+  padding:12px 14px; border-radius:9px; background:var(--qiq-surface-2); border:1px solid ${C.border};
 }
 .qiq-rev-rationale-label {
-  display:block; margin-bottom:5px; color:#C7D8FF; font-size:12.5px;
+  display:block; margin-bottom:5px; color:${C.text}; font-size:12.5px;
   font-weight:800; letter-spacing:.5px; text-transform:uppercase;
 }
 .qiq-rev-lists { display:grid; gap:4px; margin-top:9px; }
 .qiq-rev-list { list-style:none; margin:0; padding:0; display:grid; gap:3px; font-size:14px; line-height:1.55; }
 .qiq-rev-answer { margin-top:10px; font-size:13.5px; color:${C.faint}; }
 .qiq-rev-answer-first { margin-top:16px; }
-.qiq-rev-answer summary { cursor:pointer; color:#C7D8FF; font-weight:700; }
+.qiq-rev-answer summary {
+  display:flex; align-items:center; gap:8px; cursor:pointer; color:${C.text}; font-weight:700;
+  list-style:none;
+}
+.qiq-rev-answer summary::-webkit-details-marker { display:none; }
+.qiq-answer-icon {
+  width:24px; height:24px; display:inline-grid; place-items:center; flex:0 0 24px;
+  border-radius:7px; background:rgba(37,99,235,.13); border:1px solid rgba(96,165,250,.28);
+  color:#AFC5FF; font:800 19px/1 Georgia, serif;
+}
+.qiq-rev-answer summary::after { content:"Show"; color:${C.faint}; font-size:12px; font-weight:600; }
+.qiq-rev-answer[open] summary::after { content:"Hide"; }
 .qiq-rev-answer p {
-  margin:7px 0 0; padding:9px 11px; border-radius:8px; background:#0A0F1E;
+  margin:7px 0 0; padding:9px 11px; border-radius:8px; background:var(--qiq-surface-deep);
   color:${C.dim}; line-height:1.65; white-space:pre-wrap; max-height:220px; overflow:auto;
 }
 .qiq-rev-foot { display:flex; align-items:center; gap:10px; margin-top:11px; flex-wrap:wrap; }
@@ -4662,13 +4836,17 @@ const CSS = `
 .qiq-rev-card.is-uncounted { opacity:.72; }
 
 .qiq-rev-coverage {
-  border:1px solid ${C.border}; border-radius:12px; background:#0B1220; padding:14px 16px;
+  border:1px solid ${C.border}; border-radius:12px; background:var(--qiq-surface-2); padding:14px 16px;
 }
 .qiq-rev-summary-main {
   display:flex; align-items:baseline; justify-content:space-between; gap:12px; color:${C.text};
 }
 .qiq-rev-summary-main strong { font-size:15px; }
 .qiq-rev-summary-main span { color:${C.faint}; font-size:13px; }
+.qiq-mark-saved {
+  position:absolute; top:calc(100% + 4px); right:0; color:#86EFAC !important;
+  font-size:11.5px !important; font-weight:700; white-space:nowrap; animation:qiq-fade .2s ease;
+}
 .qiq-rev-summary-counts {
   display:flex; flex-wrap:wrap; gap:8px 22px; margin-top:9px; color:${C.dim}; font-size:14px;
 }
@@ -4747,13 +4925,13 @@ const CSS = `
 
 .qiq-proc-coverage {
   margin-top:20px; font-size:14px; color:${C.text};
-  border:1px solid ${C.borderSoft}; border-radius:10px; padding:9px 14px; background:#0B1220;
+  border:1px solid ${C.borderSoft}; border-radius:10px; padding:9px 14px; background:var(--qiq-surface-2);
 }
 
 .qiq-reflist { display:grid; gap:5px; margin-top:8px; }
 .qiq-refitem {
   display:flex; gap:8px; align-items:center; font-size:13.5px; color:${C.dim};
-  background:#0B1220; border:1px solid ${C.border}; border-radius:8px; padding:6px 9px;
+  background:var(--qiq-surface-2); border:1px solid ${C.border}; border-radius:8px; padding:6px 9px;
 }
 .qiq-reficon { flex-shrink:0; }
 
@@ -4773,7 +4951,7 @@ const CSS = `
 .qiq-page-block { margin:0; }
 .qiq-page-stage {
   position:relative; line-height:0; border-radius:12px;
-  border:1px solid ${C.border}; background:#0B1220; overflow:hidden;
+  border:1px solid ${C.border}; background:var(--qiq-surface-2); overflow:hidden;
 }
 .qiq-page-img { display:block; width:100%; height:auto; }
 
@@ -4805,7 +4983,7 @@ const CSS = `
 /* the question behind the highlights, above the pages */
 .qiq-qcard {
   border:1px solid #2D405D; border-left:4px solid ${C.blue}; border-radius:12px;
-  background:#111B30; padding:16px 18px; margin-bottom:16px;
+  background:var(--qiq-surface-raised); padding:16px 18px; margin-bottom:16px;
 }
 .qiq-qcard-head { display:flex; gap:12px; align-items:flex-start; justify-content:space-between; }
 .qiq-qcard-num {
@@ -4814,7 +4992,7 @@ const CSS = `
 }
 .qiq-qcard-text {
   margin-top:12px; max-width:1100px; font-size:16px; font-weight:600;
-  color:#F1F5F9; line-height:1.65;
+  color:${C.text}; line-height:1.65;
 }
 .qiq-qcard-marks {
   flex-shrink:0; text-align:right; font-size:18px; font-weight:800; color:${C.text};
@@ -4822,10 +5000,10 @@ const CSS = `
 }
 .qiq-qcard-where {
   font-size:15px; margin-top:13px; line-height:1.55; padding:9px 11px;
-  border-radius:8px; background:#0B1426;
+  border-radius:8px; background:var(--qiq-editor);
 }
 .qiq-qcard-why {
-  font-size:16px; color:#CBD5E1; line-height:1.75; margin:12px 0 0;
+  font-size:16px; color:${C.dim}; line-height:1.75; margin:12px 0 0;
   padding:12px 14px; border-radius:9px; background:rgba(148,163,184,.06);
   border:1px solid ${C.border};
 }
@@ -4889,8 +5067,8 @@ const CSS = `
 @keyframes qiq-blink { 0%,100%{opacity:1} 50%{opacity:.2} }
 
 .qiq-margin { display:grid; gap:10px; max-height:62vh; overflow:auto; padding-right:4px; align-content:start; }
-.qiq-note { background:#0B1220; border:1px solid ${C.border}; border-radius:10px; padding:10px 12px; transition:.18s; }
-.qiq-note.is-active { background:#111C33; border-color:${C.borderSoft}; transform: translateX(-3px); }
+.qiq-note { background:var(--qiq-surface-2); border:1px solid ${C.border}; border-radius:10px; padding:10px 12px; transition:.18s; }
+.qiq-note.is-active { background:var(--qiq-pop); border-color:${C.borderSoft}; transform: translateX(-3px); }
 .qiq-note.is-unsure { background: rgba(245,158,11,.05); }
 .qiq-note-enter { animation: qiq-note-in .44s cubic-bezier(.22,1,.36,1) both; }
 @keyframes qiq-note-in {
@@ -4923,7 +5101,7 @@ const CSS = `
   display:flex; align-items:center; gap:14px; flex-wrap:wrap; margin-bottom:16px;
 }
 .qiq-report {
-  background: linear-gradient(180deg, #0E1A2F, #0B1220);
+  background: linear-gradient(180deg, #0E1A2F, var(--qiq-surface-2));
   border:1px solid ${C.border}; border-radius:16px; padding:26px 28px;
 }
 .qiq-report-head {
@@ -4944,10 +5122,16 @@ const CSS = `
 }
 
 .qiq-report-fields {
-  display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:16px; margin:20px 0 4px;
+  display:grid; grid-template-columns:repeat(auto-fit, minmax(180px,1fr)); gap:16px; margin:20px 0 4px;
 }
 @media (max-width: 780px) { .qiq-report-fields { grid-template-columns: 1fr; } }
 .qiq-rfield { display:block; }
+.qiq-rlabel-input {
+  width:100%; margin:0 0 5px; padding:0; border:0; outline:0; background:transparent;
+  color:${C.faint}; font-family:inherit; font-size:12px; font-weight:700; letter-spacing:1.1px;
+  text-transform:uppercase;
+}
+.qiq-print-only { display:none !important; }
 .qiq-rfield > span {
   display:block; font-size:12px; letter-spacing:1.1px; text-transform:uppercase;
   color:${C.faint}; font-weight:700; margin-bottom:5px;
@@ -4959,6 +5143,12 @@ const CSS = `
 }
 .qiq-rinput:focus { border-bottom-color:${C.blue}; }
 .qiq-rinput::placeholder { color:#3D4A61; }
+.qiq-report-ready {
+  display:flex; justify-content:space-between; gap:14px; align-items:center; margin-top:16px;
+  padding:11px 13px; border-radius:10px; border:1px solid rgba(96,165,250,.24);
+  background:rgba(37,99,235,.055); color:${C.dim}; font-size:13.5px;
+}
+.qiq-report-ready strong { color:${C.text}; font-size:14px; }
 
 .qiq-report-score {
   display:flex; align-items:center; justify-content:space-around; gap:28px; flex-wrap:wrap;
@@ -4981,7 +5171,7 @@ const CSS = `
 .qiq-grade-block { text-align:center; }
 .qiq-grade-stamp {
   width:104px; height:104px; border-radius:26px; display:grid; place-items:center;
-  font-size:40px; font-weight:800; border:3px solid; background:#0B1220; letter-spacing:-1.5px;
+  font-size:40px; font-weight:800; border:3px solid; background:var(--qiq-surface-2); letter-spacing:-1.5px;
   animation: qiq-stamp .6s cubic-bezier(.34,1.56,.64,1) both .3s;
 }
 @keyframes qiq-stamp {
@@ -5034,7 +5224,7 @@ const CSS = `
      italic run is markedly slower to read on screen. The serif and the size keep
      it feeling like a written remark rather than UI chrome. */
   font-family: Georgia, "Times New Roman", serif;
-  font-size:17px; line-height:1.75; color:#F1F5F9; min-height:96px;
+  font-size:17px; line-height:1.75; color:${C.text}; min-height:96px;
 }
 .qiq-remark-sign {
   margin-top:14px; text-align:right; font-size:15px; color:${C.faint}; font-style:italic;
@@ -5048,12 +5238,12 @@ const CSS = `
 .qiq-table { width:100%; border-collapse:collapse; font-size:15px; min-width:640px; }
 .qiq-table th {
   text-align:left; font-size:12.5px; letter-spacing:.8px; text-transform:uppercase;
-  color:${C.dim}; font-weight:700; padding:11px 14px; background:#0B1220;
+  color:${C.dim}; font-weight:700; padding:11px 14px; background:var(--qiq-surface-2);
   border-bottom:1px solid ${C.border};
 }
 .qiq-table td { padding:13px 14px; border-bottom:1px solid rgba(30,41,59,.7); vertical-align:top; }
 .qiq-table tbody tr:hover { background: rgba(37,99,235,.05); }
-.qiq-table tfoot td { background:#0B1220; border-bottom:none; font-size:15px; }
+.qiq-table tfoot td { background:var(--qiq-surface-2); border-bottom:none; font-size:15px; }
 .qiq-chip {
   display:inline-block; font-size:13px; font-weight:700; padding:3px 9px;
   border-radius:99px; border:1px solid; white-space:nowrap;
@@ -5061,7 +5251,7 @@ const CSS = `
 
 .qiq-two-col { display:grid; grid-template-columns: 1fr 1fr; gap:14px; margin-top:26px; }
 @media (max-width: 760px) { .qiq-two-col { grid-template-columns: 1fr; } }
-.qiq-listcard { background:#0B1220; border:1px solid ${C.border}; border-radius:12px; padding:16px 18px; }
+.qiq-listcard { background:var(--qiq-surface-2); border:1px solid ${C.border}; border-radius:12px; padding:16px 18px; }
 .qiq-list { list-style:none; padding:0; margin:0; display:grid; gap:9px; }
 .qiq-list li { display:flex; gap:9px; font-size:15px; line-height:1.6; color:${C.dim}; }
 .qiq-study {
@@ -5076,14 +5266,14 @@ const CSS = `
 }
 
 .qiq-mono {
-  width:100%; min-height:420px; background:#0B1220; border:1px solid ${C.border};
-  border-radius:12px; color:#CBD5E1; padding:18px 20px; resize:vertical; outline:none;
+  width:100%; min-height:420px; background:var(--qiq-surface-2); border:1px solid ${C.border};
+  border-radius:12px; color:${C.text}; padding:18px 20px; resize:vertical; outline:none;
   font-family: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
   font-size:15px; line-height:1.8; white-space:pre-wrap;
 }
 .qiq-mono:focus { border-color:${C.blue}; box-shadow:0 0 0 3px rgba(37,99,235,.16); }
 .qiq-pre {
-  margin-top:10px; background:#0B1220; border:1px solid ${C.border}; border-radius:10px;
+  margin-top:10px; background:var(--qiq-surface-2); border:1px solid ${C.border}; border-radius:10px;
   padding:14px; font-size:13.5px; color:${C.faint}; max-height:280px; overflow:auto;
   white-space:pre-wrap; word-break:break-word;
   font-family: ui-monospace, "SF Mono", Consolas, monospace;
@@ -5112,6 +5302,7 @@ const CSS = `
   body * { visibility: hidden !important; }
   .qiq-report, .qiq-report * { visibility: visible !important; }
   .qiq-noprint, .qiq-noprint * { display:none !important; }
+  .qiq-print-only { display:block !important; }
 
   .qiq-root { background:#fff !important; padding:0 !important; }
 
