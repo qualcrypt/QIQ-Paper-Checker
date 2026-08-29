@@ -13,6 +13,7 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 
 - Reorganised the setup into clear sections for the question paper, reference material, student answer sheet, student details, and marking guidance.
 - Numbered the four setup sections consistently: question paper, reference material, student answer sheet, and student details.
+- Added a small amount of breathing room above the first **Question paper** section while keeping it visually connected to the panel.
 - Improved upload descriptions to explain accepted documents and handwriting support in plain language.
 - Removed duplicate numbers and upload symbols from inside the upload areas so the section headings provide the only numbering.
 - Standardised all three upload areas to the same height, spacing, typography, and **Browse files** action.
@@ -24,6 +25,8 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Improved question-mark entry so sub-parts remain grouped and visible while marks are entered.
 - Kept questions in place after their marks are entered instead of moving them elsewhere.
 - Added a sticky primary action so starting the paper check is easier to access.
+- Rewrote the new-paper guidance in natural educator language, including **Prepare the paper for checking** and **Ready when you are** states.
+- Clarified the three setup items as recommended question-paper support, optional reference guidance, and the required student work.
 
 ## Answer and marking guide
 

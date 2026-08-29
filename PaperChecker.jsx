@@ -484,7 +484,7 @@ function SectionTitle({ n, title, action, compactTop = false }) {
         display: "flex",
         alignItems: "center",
         gap: 9,
-        margin: `${compactTop ? -8 : 20}px 0 10px`,
+        margin: `${compactTop ? 2 : 20}px 0 10px`,
       }}
     >
       {n !== undefined && n !== null && <span className="qiq-step-num">{n}</span>}
@@ -2374,21 +2374,21 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
 function EmptyState({ hasPages, hasExam, hasReference }) {
   const steps = [
-    { done: hasExam, label: "Question paper", note: hasExam ? "Questions and marks added" : "Recommended to save setup time" },
-    { done: hasReference, label: "Reference material", note: hasReference ? "Ready to guide marking" : "Optional — textbook, notes, or model answers" },
-    { done: hasPages, label: "Student answer sheet", note: hasPages ? "Ready to be checked" : "Required before checking" },
+    { done: hasExam, label: "Question paper", note: hasExam ? "Questions and marks ready" : "Recommended — brings in questions and marks" },
+    { done: hasReference, label: "Reference material", note: hasReference ? "Marking guidance ready" : "Optional — model answers, notes, or textbook pages" },
+    { done: hasPages, label: "Student answer sheet", note: hasPages ? "Answer sheet ready" : "Required — the work you want to check" },
   ];
   return (
     <div className="qiq-empty">
-      <div className="qiq-empty-kicker">New paper</div>
+      <div className="qiq-empty-kicker">{hasPages ? "Ready when you are" : "Start a new paper"}</div>
       <div className="qiq-empty-icon">✓</div>
       <div className="qiq-empty-title">
-        {hasPages ? "Your answer paper is ready" : "Set up a paper in three simple steps"}
+        {hasPages ? "The answer sheet is ready" : "Prepare the paper for checking"}
       </div>
       <p className="qiq-empty-copy">
         {hasPages
-          ? "Review the setup below, then use the button at the bottom of the left panel to begin checking."
-          : "Use the upload panel on the left. QIQ accepts typed documents, scans, phone photos, and handwritten work."}
+          ? "Review the questions, marks, and guidance on the left, then select Start checking paper."
+          : "Add the teaching materials and the student's answer sheet using the panel on the left."}
       </p>
       <div className="qiq-setup-list">
         {steps.map((item, i) => (
