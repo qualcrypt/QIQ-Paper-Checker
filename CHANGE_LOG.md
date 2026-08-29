@@ -1,4 +1,4 @@
-# Teacher Experience Improvements
+# QIQ Paper Checker Change Log
 
 This document records the refinements made to QIQ Paper Checker to make it clearer, calmer, and easier for teachers and faculty members to use.
 
@@ -12,7 +12,10 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 ## Upload and setup experience
 
 - Reorganised the setup into clear sections for the question paper, reference material, student answer sheet, student details, and marking guidance.
+- Numbered the four setup sections consistently: question paper, reference material, student answer sheet, and student details.
 - Improved upload descriptions to explain accepted documents and handwriting support in plain language.
+- Removed duplicate numbers and upload symbols from inside the upload areas so the section headings provide the only numbering.
+- Standardised all three upload areas to the same height, spacing, typography, and **Browse files** action.
 - Added clear confirmation messages after successful uploads.
 - Changed upload actions to **Add more files** after a document has been added.
 - Made completed upload areas more compact so later setup sections remain easier to reach.
@@ -22,9 +25,10 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Kept questions in place after their marks are entered instead of moving them elsewhere.
 - Added a sticky primary action so starting the paper check is easier to access.
 
-## Marking guidance
+## Answer and marking guide
 
-- Made **Expected answer / marking scheme** available even when a question paper has been uploaded.
+- Renamed **Expected answer / marking scheme** to the clearer **Answer and marking guide**.
+- Made the answer and marking guide available even when a question paper has been uploaded.
 - Allowed educators to add expected points, acceptable alternatives, and mark-allocation instructions.
 - Kept educator guidance optional when the question paper already provides the questions and marks.
 - Retained **Use sample** to demonstrate the expected marking-guidance format.
@@ -33,6 +37,9 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 ## Student details
 
 - Made the student-details card collapsible to reduce setup-page length.
+- Assigned it setup number **4** to continue the sequence used by the upload sections.
+- Replaced the text-like disclosure symbol with a cleaner circular chevron.
+- Kept a clear card boundary around the section so its expandable content remains visually grouped.
 - Added labelled fields for:
   - Name
   - Roll No.
@@ -40,6 +47,12 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Added flexible student-information rows that educators can create or delete.
 - Replaced mechanical labels such as **Field** and **Value** with natural prompts such as **For example, Class or Section** and **Enter details**.
 - Included standard and custom student details in the final report.
+
+## Marks setup
+
+- Removed the pre-filled total of **20 marks** when no question paper is supplied.
+- The total-marks field now starts empty and asks the teacher to enter the correct maximum mark.
+- Kept the answer-and-marking-guide and total-marks labels naturally aligned with their full-width input fields.
 
 ## Mark review experience
 
@@ -106,6 +119,7 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Added Light and Dark themes.
 - Kept the original navy-blue colour palette for the Dark theme.
 - Created a purpose-built Light theme with appropriate surfaces, borders, text colours, and contrast.
+- Increased the contrast of the green **All question marks are ready** message in the Light theme for easier reading.
 - Added a persistent theme preference that is remembered between visits.
 - Replaced the original theme button with a compact sliding switch showing the current **Dark** or **Light** state.
 - Improved spacing between the workflow stages and theme switch.
@@ -115,4 +129,3 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Rebuilt the application after the refinements.
 - Re-ran the relevant identity, choice, marking, and pipeline tests.
 - Checked the source changes for formatting errors.
-

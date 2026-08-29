@@ -479,13 +479,30 @@ function Legend() {
 
 function SectionTitle({ n, title, action, compactTop = false }) {
   return (
-    <div style={{ display: "flex", alignItems: "center", gap: 9, margin: `${compactTop ? -8 : 20}px 0 10px` }}>
-      <span className="qiq-step-num">{n}</span>
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        margin: `${compactTop ? -8 : 20}px 0 10px`,
+      }}
+    >
+      {n !== undefined && n !== null && <span className="qiq-step-num">{n}</span>}
       <span style={{ fontSize: 15, fontWeight: 750, letterSpacing: 0.2, color: C.text }}>
         {title}
       </span>
       {action && <span style={{ marginLeft: "auto" }}>{action}</span>}
     </div>
+  );
+}
+
+function DisclosureIcon() {
+  return (
+    <span className="qiq-disclosure-icon" aria-hidden="true">
+      <svg viewBox="0 0 20 20" focusable="false">
+        <path d="m6.5 8 3.5 3.5L13.5 8" />
+      </svg>
+    </span>
   );
 }
 
@@ -523,7 +540,7 @@ export default function PaperChecker() {
   const [dragging, setDragging] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const [expectedAnswer, setExpectedAnswer] = useState("");
-  const [totalMarks, setTotalMarks] = useState("20");
+  const [totalMarks, setTotalMarks] = useState("");
 
   /* Report-card identity fields — kept at this level so the history log and the
      printed report agree, and so they survive tab switches. */
@@ -1800,7 +1817,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     e.target.value = "";
                   }}
                 />
-                <div className="qiq-upload-icon" aria-hidden="true">{examBusy ? "…" : "1"}</div>
+                {examBusy ? <div className="qiq-upload-icon" aria-hidden="true">…</div> : null}
                 <div className="qiq-upload-body">
                   <div className="qiq-upload-title">
                     {examBusy ? "Reading the question paper…" : "Choose question paper"}
@@ -1852,7 +1869,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                 e.target.value = "";
               }}
             />
-            <div className="qiq-upload-icon is-optional" aria-hidden="true">{refBusy ? "…" : "2"}</div>
+            {refBusy ? <div className="qiq-upload-icon is-optional" aria-hidden="true">…</div> : null}
             <div className="qiq-upload-body">
               <div className="qiq-upload-title">
                 {refBusy ? "Preparing reference material…" : refFiles.length ? "Reference material added" : "Choose reference material"}
@@ -1913,7 +1930,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
           <label
             id="qiq-field-pages"
-            className={`qiq-drop${pages.length || textDoc ? " is-complete" : ""}${dragging ? " is-dragging" : ""}${invalid === "pages" ? " qiq-invalid" : ""}`}
+            className={`qiq-drop qiq-drop-sm${pages.length || textDoc ? " is-complete" : ""}${dragging ? " is-dragging" : ""}${invalid === "pages" ? " qiq-invalid" : ""}`}
             onDragOver={(e) => {
               e.preventDefault();
               setDragging(true);
@@ -1935,18 +1952,18 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                 e.target.value = "";
               }}
             />
-            <div className="qiq-drop-icon">{preparing ? <span className="qiq-spinner" /> : "↑"}</div>
+            {preparing ? <div className="qiq-drop-icon"><span className="qiq-spinner" /></div> : null}
             <div className="qiq-upload-body">
-              <div className="qiq-upload-title is-large">
-                {preparing ? "Preparing answer pages…" : pages.length || textDoc ? "Student answer sheet added" : "Choose the student's answer sheet"}
+              <div className="qiq-upload-title">
+                {preparing ? "Preparing answer pages…" : pages.length || textDoc ? "Student answer sheet added" : "Choose student answer sheet"}
               </div>
               <div className="qiq-upload-copy">
-                Drag and drop a PDF, Word document, JPG, or PNG. Scanned and handwritten answer sheets are supported.
+                PDF, Word, JPG, or PNG. Scanned and handwritten work is supported.
               </div>
             </div>
             {!preparing && (
               <span className="qiq-upload-action">
-                {pages.length || textDoc ? "Add more answer files" : "Browse answer files"}
+                {pages.length || textDoc ? "Add more files" : "Browse files"}
               </span>
             )}
           </label>
@@ -2006,7 +2023,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
           <details className="qiq-collapsible">
             <summary className="qiq-collapsible-summary">
-              <span className="qiq-step-num">4</span>
+              <span className="qiq-step-num" aria-hidden="true">4</span>
               <span className="qiq-collapsible-title">Student details · Optional</span>
               {(studentName.trim() || rollNumber.trim() || subject.trim() || studentDetails.some((row) => row.value.trim())) && (
                 <span className="qiq-collapsible-value">
@@ -2015,7 +2032,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                     .join(" · ")}
                 </span>
               )}
-              <span className="qiq-collapsible-chevron" aria-hidden="true">⌄</span>
+              <DisclosureIcon />
             </summary>
             <div className="qiq-collapsible-body">
               <label className="qiq-detail-field">
@@ -2078,12 +2095,12 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
           </details>
 
           <SectionTitle
-            n="5"
-            title={`Expected answer / marking scheme${examMode ? " · Optional" : ""}`}
+            title={`Answer and marking guide${examMode ? " · Optional" : ""}`}
             action={
               !expectedAnswer.trim() && (
                 <button
                   className="qiq-mini-btn"
+                  type="button"
                   onClick={() => {
                     setExpectedAnswer(SAMPLE_SCHEME);
                     setInvalid("");
@@ -2113,14 +2130,14 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
               ? `Teacher guidance added · ${expectedAnswer.trim().split(/\s+/).length} words`
               : examMode
               ? "Optional — add guidance if you want to adjust how the answers are marked."
-              : "Add an expected answer or marking scheme before checking the paper."}
+              : "Add an answer and marking guide before checking the paper."}
           </div>
 
           {/* The question paper already supplies the total. Without one, the
               teacher provides the maximum marks here. */}
           {!examMode && (
             <>
-            <SectionTitle n="6" title="Total marks" />
+            <SectionTitle title="Total marks" />
             <input
               id="qiq-field-marks"
               className={`qiq-input${invalid === "marks" ? " qiq-invalid" : ""}`}
@@ -2134,7 +2151,7 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
                   setError("");
                 }
               }}
-              placeholder="20"
+              placeholder="Enter total marks"
             />
             </>
           )}
@@ -4401,11 +4418,16 @@ const CSS = `
   margin-left:auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
   color:${C.dim}; font-size:13px;
 }
-.qiq-collapsible-chevron {
-  margin-left:auto; color:#93B4FF; font-size:18px; font-weight:800; transition:transform .18s;
+.qiq-collapsible-summary > .qiq-mini-btn { margin-left:auto; }
+.qiq-disclosure-icon {
+  width:28px; height:28px; flex:0 0 28px; margin-left:auto; display:grid; place-items:center;
+  border:1px solid ${C.borderSoft}; border-radius:50%; color:#93B4FF;
+  background:rgba(37,99,235,.08); transition:background .18s, transform .18s;
 }
-.qiq-collapsible-value + .qiq-collapsible-chevron { margin-left:4px; }
-.qiq-collapsible[open] .qiq-collapsible-chevron { transform:rotate(180deg); }
+.qiq-collapsible-value + .qiq-disclosure-icon,
+.qiq-collapsible-summary > .qiq-mini-btn + .qiq-disclosure-icon { margin-left:4px; }
+.qiq-disclosure-icon svg { width:18px; height:18px; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.qiq-collapsible[open] .qiq-disclosure-icon { transform:rotate(180deg); background:rgba(37,99,235,.14); }
 .qiq-collapsible-body {
   display:grid; gap:9px; padding:0 14px 14px; border-top:1px solid ${C.border}; padding-top:13px;
 }
@@ -4716,6 +4738,7 @@ const CSS = `
 .qiq-missing-marks.is-complete { background:rgba(34,197,94,.07); border-color:rgba(34,197,94,.32); }
 .qiq-missing-marks.is-complete .qiq-missing-icon { background:${C.green}; color:#052E16; }
 .qiq-missing-marks.is-complete .qiq-missing-marks-head strong { color:#BBF7D0; }
+.qiq-root.is-light .qiq-missing-marks.is-complete .qiq-missing-marks-head strong { color:#047857; }
 .qiq-missing-marks-head { display:flex; align-items:flex-start; gap:9px; color:${C.text}; }
 .qiq-missing-marks-head strong { display:block; font-size:14px; color:#FDE68A; }
 .qiq-missing-marks-head small { display:block; margin-top:2px; color:${C.dim}; font-size:13.5px; line-height:1.45; }
