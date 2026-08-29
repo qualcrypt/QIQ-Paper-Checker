@@ -4365,7 +4365,10 @@ const CSS = `
   overflow: hidden;
 }
 .qiq-grid > aside.qiq-panel { padding:22px; }
-.qiq-right { min-height: 560px; display:flex; flex-direction:column; overflow:visible; }
+.qiq-right {
+  min-height:calc(100dvh - 127px);
+  display:flex; flex-direction:column; overflow:visible;
+}
 
 .qiq-step-num {
   width:24px; height:24px; border-radius:7px; display:grid; place-items:center;
