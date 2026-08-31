@@ -25,6 +25,8 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Improved question-mark entry so sub-parts remain grouped and visible while marks are entered.
 - Kept questions in place after their marks are entered instead of moving them elsewhere.
 - Added a sticky primary action so starting the paper check is easier to access.
+- Moved the sticky **Start checking paper** action into an opaque footer with a clear top boundary so it never covers form content.
+- Kept the action in normal document flow on tablet and mobile layouts.
 - Rewrote the new-paper guidance in natural educator language, including **Prepare the paper for checking** and **Ready when you are** states.
 - Clarified the three setup items as recommended question-paper support, optional reference guidance, and the required student work.
 
@@ -133,6 +135,11 @@ This document records the refinements made to QIQ Paper Checker to make it clear
 - Simplified the header identity to **QIQ Paper Checker** with a quieter educator-focused subtitle.
 - Reworked the Q logo from a generic purple treatment to a richer ink-blue identity that matches the educator workspace.
 - Added a restrained cyan accent, inner highlight, stronger edge definition, and softer depth to keep the logo distinctive without overpowering the header.
+- Constrained the desktop workspace to the viewport so the outer page and header remain fixed.
+- Added independent internal scrolling to both the left setup panel and right review panel while preserving their complete bottom boundaries.
+- Kept normal page scrolling on tablet and mobile layouts.
+- Hid panel scrollbars while idle and revealed them with stronger contrast during mouse-wheel, touch, or direct scrolling.
+- Automatically hid active scrollbars shortly after scrolling stops.
 
 ## Verification
 

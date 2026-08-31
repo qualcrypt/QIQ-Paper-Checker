@@ -413,6 +413,19 @@ function useSpeech() {
 
 /* =============================================================== SUB-UI ==== */
 
+const panelScrollTimers = new WeakMap();
+function showScrollbarWhileScrolling(event) {
+  const panel = event.currentTarget;
+  panel.classList.add("is-scrolling");
+  const previous = panelScrollTimers.get(panel);
+  if (previous) window.clearTimeout(previous);
+  const timer = window.setTimeout(() => {
+    panel.classList.remove("is-scrolling");
+    panelScrollTimers.delete(panel);
+  }, 700);
+  panelScrollTimers.set(panel, timer);
+}
+
 /**
  * `step` is how far the paper has got; `running` says whether that step is
  * actually executing right now. Without the distinction, merely uploading a
@@ -1811,7 +1824,12 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
       <div className="qiq-grid">
         {/* ================================================== LEFT PANEL === */}
-        <aside className="qiq-panel qiq-noprint">
+        <aside
+          className="qiq-panel qiq-noprint"
+          onScroll={showScrollbarWhileScrolling}
+          onWheel={showScrollbarWhileScrolling}
+          onTouchMove={showScrollbarWhileScrolling}
+        >
           <SectionTitle
             n="1"
             title="Question paper"
@@ -2184,18 +2202,20 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
             </div>
           )}
 
-          <button className="qiq-btn qiq-primary-action" onClick={checkPaper} disabled={busy || preparing || !readyToCheck}>
-            {busy ? (
-              <>
-                <span className="qiq-spinner" />
-                {stage === "ocr" ? "Reading paper…" : "Marking answers…"}
-              </>
-            ) : evaluation ? (
-              "Check this paper again"
-            ) : (
-              "Start checking paper"
-            )}
-          </button>
+          <div className={`qiq-primary-action-dock${!evaluation ? " is-sticky" : ""}`}>
+            <button className="qiq-btn qiq-primary-action" onClick={checkPaper} disabled={busy || preparing || !readyToCheck}>
+              {busy ? (
+                <>
+                  <span className="qiq-spinner" />
+                  {stage === "ocr" ? "Reading paper…" : "Marking answers…"}
+                </>
+              ) : evaluation ? (
+                "Check this paper again"
+              ) : (
+                "Start checking paper"
+              )}
+            </button>
+          </div>
 
           {evaluation && !busy && (
             <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -2210,14 +2230,21 @@ Return ONLY valid JSON in this exact structure, with no commentary and no markdo
 
           <HistoryPanel history={history} onClear={clearHistory} />
 
-          <p style={{ fontSize: 13, color: C.faint, marginTop: 14, lineHeight: 1.6 }}>
-            “Mark again” uses the answer text already read, so you can adjust the marking scheme or correct
-            misread words without reading every page again.
-          </p>
+          {evaluation && (
+            <p style={{ fontSize: 13, color: C.faint, marginTop: 14, lineHeight: 1.6, paddingInline: 2 }}>
+              “Mark again” uses the answer text already read, so you can adjust the marking scheme or correct
+              misread words without reading every page again.
+            </p>
+          )}
         </aside>
 
         {/* ================================================= RIGHT PANEL === */}
-        <main className="qiq-panel qiq-right">
+        <main
+          className="qiq-panel qiq-right"
+          onScroll={showScrollbarWhileScrolling}
+          onWheel={showScrollbarWhileScrolling}
+          onTouchMove={showScrollbarWhileScrolling}
+        >
           {busy && (
             <Processing
               stage={stage}
@@ -4430,10 +4457,38 @@ const CSS = `
   min-width: 0; /* a grid child must be allowed to shrink, or wide content escapes */
   overflow: hidden;
 }
-.qiq-grid > aside.qiq-panel { padding:22px; }
+.qiq-grid > aside.qiq-panel {
+  height:calc(100dvh - 127px); padding:22px; overflow-y:auto; overscroll-behavior:contain;
+  scrollbar-width:thin; scrollbar-color:transparent transparent;
+}
+.qiq-grid > aside.qiq-panel.is-scrolling { scrollbar-color:${C.dim} transparent; }
+.qiq-grid > aside.qiq-panel::-webkit-scrollbar { width:8px; }
+.qiq-grid > aside.qiq-panel::-webkit-scrollbar-track { background:transparent; }
+.qiq-grid > aside.qiq-panel::-webkit-scrollbar-thumb {
+  background:transparent; border:2px solid transparent; border-radius:999px; background-clip:padding-box;
+}
+.qiq-grid > aside.qiq-panel.is-scrolling::-webkit-scrollbar-thumb { background:${C.dim}; }
 .qiq-right {
-  min-height:calc(100dvh - 127px);
-  display:flex; flex-direction:column; overflow:visible;
+  height:calc(100dvh - 127px); min-height:0;
+  display:flex; flex-direction:column; overflow-y:auto; overscroll-behavior:contain;
+  scrollbar-width:thin; scrollbar-color:transparent transparent;
+}
+.qiq-right.is-scrolling { scrollbar-color:${C.dim} transparent; }
+.qiq-right::-webkit-scrollbar { width:8px; }
+.qiq-right::-webkit-scrollbar-track { background:transparent; }
+.qiq-right::-webkit-scrollbar-thumb {
+  background:transparent; border:2px solid transparent; border-radius:999px; background-clip:padding-box;
+}
+.qiq-right.is-scrolling::-webkit-scrollbar-thumb { background:${C.dim}; }
+@media (min-width:1081px) {
+  .qiq-root { height:100dvh; min-height:0; overflow:hidden; box-sizing:border-box; display:flex; flex-direction:column; }
+  .qiq-header { flex:0 0 auto; }
+  .qiq-grid { flex:1; min-height:0; }
+  .qiq-grid > aside.qiq-panel, .qiq-right { height:100%; }
+}
+@media (max-width:1080px) {
+  .qiq-grid > aside.qiq-panel { height:auto; max-height:none; overflow-y:visible; }
+  .qiq-right { height:auto; min-height:calc(100dvh - 127px); overflow-y:visible; }
 }
 
 .qiq-step-num {
@@ -4578,7 +4633,22 @@ const CSS = `
   font-family:inherit; box-shadow:0 8px 24px rgba(37,99,235,.3); transition:.18s;
 }
 .qiq-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow:0 12px 30px rgba(37,99,235,.42); }
-.qiq-primary-action { position:sticky; bottom:12px; z-index:12; }
+.qiq-primary-action { position:static; margin-top:0; }
+.qiq-primary-action-dock { margin-top:18px; }
+.qiq-primary-action-dock.is-sticky {
+  position:sticky; z-index:12; bottom:-22px; margin:18px -22px -22px; padding:12px 22px 22px;
+  background:${C.card}; border-top:1px solid ${C.border};
+  box-shadow:0 -10px 22px rgba(15,23,42,.06);
+}
+.qiq-primary-action-dock.is-sticky .qiq-btn:disabled {
+  opacity:1; color:${C.faint}; background:var(--qiq-surface-raised);
+  border:1px solid ${C.border}; box-shadow:none;
+}
+@media (max-width:1080px) {
+  .qiq-primary-action-dock.is-sticky {
+    position:static; margin:18px 0 0; padding:0; background:transparent; border-top:0; box-shadow:none;
+  }
+}
 .qiq-btn:disabled { opacity:.65; cursor:progress; box-shadow:none; }
 .qiq-btn-ghost {
   margin-top:0; background:var(--qiq-surface-2); border:1px solid ${C.border}; color:${C.dim};
